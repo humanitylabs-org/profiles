@@ -5,13 +5,14 @@ Run after every source edit:  python3 -I tools/package.py
 import os
 import subprocess
 import sys
+import shlex
 from pathlib import Path
 
 import yaml
 
 root = Path(__file__).resolve().parent.parent
-wam = os.path.expanduser('~/.wizard-os/builder/current/bin/wam')
-subprocess.run([wam, 'package-inline', str(root)], check=True, stdout=subprocess.DEVNULL)
+wam = shlex.split(os.environ.get('WAM_BUILDER', os.path.expanduser('~/.wizard-os/builder/current/bin/wam')))
+subprocess.run([*wam, 'package-inline', str(root)], check=True, stdout=subprocess.DEVNULL)
 path = root / 'runtipi' / 'docker-compose.yml'
 doc = yaml.safe_load(path.read_text())
 svc = doc['services']['profiles']
@@ -29,13 +30,15 @@ svc['x-runtipi']['internal_port'] = 8836
 # base64 bundle passed that (exec: argument list too long). Compressed it is about a third of the size.
 import base64, json, zlib  # noqa: E402
 view = sorted('web/' + p.name for p in (root / 'web').iterdir() if p.is_file() and not p.name.startswith('.'))
-payload = {p: (root / p).read_text() for p in ['app/server.py', 'openapi.json'] + view}
+app = sorted('app/' + p.name for p in (root / 'app').glob('*.py'))
+payload = {p: (root / p).read_text() for p in app + ['openapi.json'] + view}
 blob = base64.b64encode(zlib.compress(json.dumps(payload, sort_keys=True).encode(), 9)).decode()
-code = ("import base64,json,pathlib,runpy,zlib\n"
+code = ("import base64,json,pathlib,runpy,sys,zlib\n"
         "root=pathlib.Path('/tmp/wizard-app');root.mkdir(exist_ok=True)\n"
         f"files=json.loads(zlib.decompress(base64.b64decode('{blob}')))\n"
         "for name,text in files.items():\n"
         " p=root/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text)\n"
+        "sys.path.insert(0,str(root/'app'))\n"
         "runpy.run_path(str(root/'app/server.py'),run_name='__main__')\n")
 if len(code) > 120_000:
     sys.exit(f'bundle too large for one exec argument: {len(code)} bytes')

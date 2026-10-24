@@ -228,3 +228,6 @@ code.pf-npub.sm { display: inline-block; margin-top: 3px; padding: 2px 8px; bord
 
 .pf-safe:not(.ok) .pf-safe-ic { color: var(--warn, #f0b54a); background: color-mix(in srgb, var(--warn, #f0b54a) 16%, transparent); }
 .pf-safe.ok .pf-safe-ic { color: var(--ok, #4fd18b); background: color-mix(in srgb, var(--ok, #4fd18b) 16%, transparent); }
+
+/* Domain action inside the existing identity card. */
+.pf-id-wrap .pf-claim { margin: 10px 12px 12px; }

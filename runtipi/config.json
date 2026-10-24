@@ -9,9 +9,9 @@
   "categories": [
     "social"
   ],
-  "description": "Your Wizard profile with its own Nostr ID. Share your look, your build and your App Store apps with friends or everyone, encrypted through Nostr. Nobody connects to your Wizard; apps you build never show.",
-  "tipi_version": 6,
-  "version": "0.5.1",
+  "description": "Your phone Wizard ID is you; this Wizard is your revocable inbox and sharing device. Claim on your phone, add friends with phone approval, and share your look, build and App Store apps. Unclaimed Wizards and stock peers remain compatible.",
+  "tipi_version": 7,
+  "version": "0.6.0",
   "source": "https://github.com/oscarhenrycollins/profiles",
   "exposable": false,
   "supported_architectures": [

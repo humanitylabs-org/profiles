@@ -2,7 +2,13 @@
 // No key values, response bodies, screenshots, or private files are logged.
 const { chromium } = require('playwright');
 const { execFileSync } = require('child_process');
-const U = 'http://127.0.0.1:18850/';
+const U = process.env.PROFILES_TEST_URL || 'http://127.0.0.1:18850/';
+const python = process.env.PROFILES_PYTHON || 'python3';
+const data = process.env.PROFILES_TEST_DATA;
+function fixturePython(code) {
+  if (!data) throw new Error('PROFILES_TEST_DATA must name disposable test state');
+  return execFileSync(python, ['-c', code], { cwd: require('path').resolve(__dirname, '..'), env: { ...process.env, DATA_DIR: data }, encoding: 'utf8' });
+}
 let count = 0;
 function check(value, label) { if (!value) throw new Error(label); count++; console.log('PASS ' + label); }
 async function request(path, body, headers = {}) {
@@ -29,7 +35,7 @@ async function request(path, body, headers = {}) {
     check((await request('api/identity/restore', { backup: encrypted.body.backup, password: 'throwaway testing password' })).body.changed === false, 'encrypted restore round trip');
     check((await request('api/identity/restore', { backup: raw.body.backup })).body.changed === false, 'raw restore needs no password');
     check((await request('api/identity/restore', { backup: raw.body.backup.slice(0, -1) + (raw.body.backup.endsWith('q') ? 'p' : 'q') })).status === 400, 'bad checksum refused');
-    browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome' });
+    browser = await chromium.launch({ executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome' });
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['clipboard-read', 'clipboard-write'], acceptDownloads: true });
     const p = await ctx.newPage(); const errors = [];
     p.on('pageerror', () => errors.push(true));
@@ -78,14 +84,14 @@ async function request(path, body, headers = {}) {
     await p.keyboard.press('Escape');
     check(await oldInput.evaluate(e => e.value === ''), 'close scrubs private restore input');
     // Generate a second throwaway key in memory, never read any app key file.
-    const other = JSON.parse(execFileSync('docker', ['exec', 'prof-nsec', 'python', '-c', "import json; from app import server as s; k=s.new_secret(); print(json.dumps({'key':s.b32_encode('nsec',k),'npub':s.npub_encode(s.pub_of(k)),'zero':s.b32_encode('nsec',bytes(32))}))"], { encoding: 'utf8' }));
+    const other = JSON.parse(fixturePython("import json; from app import server as s; k=s.new_secret(); print(json.dumps({'key':s.b32_encode('nsec',k),'npub':s.npub_encode(s.pub_of(k)),'zero':s.b32_encode('nsec',bytes(32))}))"));
     check((await request('api/identity/restore', { backup: other.zero })).status === 400, 'zero scalar raw key refused');
     await p.locator('.pf-safe').click(); await p.getByRole('button', { name: 'Restore it' }).click();
     await p.getByRole('textbox', { name: 'Your backup', exact: true }).fill(other.key);
     await p.getByRole('button', { name: 'Restore', exact: true }).click();
     await p.getByRole('button', { name: 'Yes, switch to that ID' }).click(); await p.waitForSelector('.pf-sheet', { state: 'detached' });
     check((await (await fetch(U + 'api/me')).json()).npub === other.npub, 'raw paste switches to a different throwaway identity');
-    const modes = execFileSync('docker', ['exec', 'prof-nsec', 'python', '-c', "from pathlib import Path; print(all((p.stat().st_mode & 0o777)==0o600 for p in Path('/data').glob('wizard-key*.json'))); print(len(list(Path('/data').glob('wizard-key.before-*.json')))>0)"], { encoding: 'utf8' }).trim();
+    const modes = fixturePython("import os; from pathlib import Path; print(all((p.stat().st_mode & 0o777)==0o600 for p in Path(os.environ['DATA_DIR']).glob('wizard-key*.json'))); print(len(list(Path(os.environ['DATA_DIR']).glob('wizard-key.before-*.json')))>0)").trim();
     check(modes === 'True\nTrue', 'current and replaced keys kept with owner-only permissions');
     check((await request('api/identity/restore', { backup: raw.body.backup })).body.changed === true, 'raw backup can undo identity replacement');
     check(errors.length === 0, 'no browser JavaScript errors');

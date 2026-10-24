@@ -1,7 +1,7 @@
 ---
 name: profiles
 description: Use when the owner asks about his Wizard profile, friends, or sharing his build, skin or apps.
-version: 0.1.0
+version: 0.6.0
 author: Hermes Agent
 license: GPL-3.0-only
 platforms: [linux, macos]
@@ -12,12 +12,14 @@ metadata:
 ---
 # Profiles
 
-The owner's Wizard profile: his build (his version of the Wizard shell), his look (skin plus his own CSS touches) and his App Store apps. Each part is Private (default), Friends or Public. Identity is a Nostr ID (npub) the app keeps for this Wizard; friends are added by npub alone. Sharing goes through public Nostr relays (public parts signed, friends' parts NIP-44 encrypted per friend, requests NIP-59 gift-wrapped); nobody connects to the owner's Wizard. Changes share automatically, no Publish step. Trying on a build is friends-only.
+The owner's Wizard profile: his build (his version of the Wizard shell), his look (skin plus his own CSS touches) and his App Store apps. Each part is Private (default), Friends or Public. Identity is the phone-owned Wizard ID (person npub); the existing app key is its inbox/profile device. Phone-signed device lists resolve people to receiving Wizards; unclaimed peers are always labelled unclaimed Wizards. Sharing goes through public Nostr relays (public parts signed, friends' parts NIP-44 encrypted per friend, requests NIP-59 gift-wrapped); nobody connects to the owner's Wizard. Changes share automatically, no Publish step. Trying on a build is friends-only.
 
 - `profile_get` reads visibility, the published snapshot, friends and requests. `profile_preview` with `as: friend|public` shows exactly what others see.
 - `profile_set_visibility` changes one part. Only when the owner asked. Sharing is a privacy decision; never widen it on your own.
 - `friends_list` and `friend_profile` (friend id) read friends and what a friend shares.
-- Backing up or restoring the Nostr identity happens only in the Profiles screen (Back up your identity, under the Nostr ID). Never ask for, read, print or move the key or the backup password yourself; point the owner there.
+- The server never holds the owner key. Claims/renewals and sending/accepting friend requests need phone approval through the shared shell identity bridge. Never bypass approval or use legacy box signing for claimed owners. Revocation/expiry fails closed.
+- Stock peers remain compatible. **Open N sealed requests** and **Open sealed profile on your phone** explicitly ask the phone to decrypt transition copies. Never retrieve secrets or plaintext yourself.
+- Backing up or restoring the unclaimed Wizard device key happens only in the Profiles screen (Back up your identity, under the Nostr ID). Never ask for, read, print or move the key or the backup password yourself; point the owner there.
 - Adding friends, choosing who sees what, wearing a look and trying on a build happen in the Profiles screen. Point the owner there instead of doing it for him. There is no Publish step: the screen shares changes by itself.
 
 Rules the app enforces (don't work around them): an app is shared only if the Wizard App Index lists its public repo, so local and private apps never show; a build is shared only if its exact commit is public shell code and never with everyone; a friend's profile is checked on this box (signature, App Index, CSS) before it is shown.

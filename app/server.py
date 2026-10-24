@@ -2,11 +2,11 @@
 
 One rule for everything: each part of a profile is Private (the default), Friends or Public. Nothing local is
 shared: an app counts only when the Wizard App Index lists its public repo, a build only when its exact commit is
-public shell code anyone can fetch, a look only as sanitised CSS (the owner's My skin, read by the view from the shell). Others see a frozen snapshot taken when the owner
-taps Publish, never live state.
+public shell code anyone can fetch, a look only as sanitised CSS (the owner's My skin, read by the view from the shell).
+Only chosen visible parts are automatically re-shared; other Wizards never access this box's live state.
 
-Identity is Nostr, never email. This Wizard has its own Nostr key (made on first start, kept in app-data): its npub
-is the profile's ID and the only thing you give a friend. Nobody connects to your Wizard: what you share goes out as
+Identity is Nostr, never email. The phone-owned Wizard ID identifies the person. This Wizard's existing key
+(made on first start, kept in app-data) is its device/inbox. Until claimed it is shown as an unclaimed Wizard. Nobody connects to your Wizard: what you share goes out as
 signed Nostr events on public relays. Public parts are one signed event anyone with your npub can read; friends'
 parts are encrypted to each friend alone (NIP-44) under a tag only the two of you can work out; a friend request is a
 NIP-59 gift wrap, so relays never see who added whom. This app answers only you (your own Wizard screens and the
@@ -32,10 +32,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
+try:
+    from . import identity_resolve as identity
+except ImportError:  # Direct script / inline Runtipi entry point.
+    import identity_resolve as identity
+
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path(os.environ.get('APP_ROOT', '.')).resolve()
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'profiles'
-VERSION = '0.5.1'
+VERSION = '0.6.0'
 INDEX = os.environ.get('WIZARD_APP_INDEX', 'https://apps.aiwizards.com').rstrip('/')
 SHELL_REPO = os.environ.get('PROFILES_SHELL_REPO', 'humanitylabs-org/wizard-ux')
 SKINS = Path(os.environ.get('SKINS_DIR', '/skins'))   # the owner's Files Skins folder, read-only
@@ -213,7 +218,15 @@ def event_id(ev):
 
 def verify_event(ev):
     try:
-        return isinstance(ev, dict) and event_id(ev) == ev['id'] and schnorr_verify(bytes.fromhex(ev['id']), bytes.fromhex(ev['pubkey']), bytes.fromhex(ev['sig']))
+        if not isinstance(ev, dict) or type(ev.get('created_at')) is not int or type(ev.get('kind')) is not int:
+            return False
+        if not 0 <= ev['kind'] <= 65535 or ev['created_at'] < 0 or not re.fullmatch(r'[0-9a-f]{64}', ev.get('pubkey', '')):
+            return False
+        if not isinstance(ev.get('content'), str) or not isinstance(ev.get('tags'), list):
+            return False
+        if any(not isinstance(t, list) or any(not isinstance(v, str) for v in t) for t in ev['tags']):
+            return False
+        return event_id(ev) == ev['id'] and schnorr_verify(bytes.fromhex(ev['id']), bytes.fromhex(ev['pubkey']), bytes.fromhex(ev['sig']))
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -420,6 +433,8 @@ def confirm_backup():
 
 def restore_identity(body):
     body = body or {}
+    if load().get('owner'):
+        raise Problem(409, 'This is a claimed Wizard. Revoke its device on your phone before replacing the device key.')
     sk = ncryptsec_decode(body.get('backup'), str(body.get('password') or ''))
     global _KEY
     with LOCK:
@@ -440,7 +455,8 @@ def restore_identity(body):
         _KEY = None
         _ck_cache.clear()
         s = load()
-        s.update({'requests': [], 'requests_since': 0, 'shared_at': None, 'sync': None, 'backed_up_at': now(), 'public_live': True})
+        s.update({'requests': [], 'requests_since': 0, 'shared_at': None, 'sync': None, 'backed_up_at': now(), 'public_live': True,
+                  'pending_actions': {}, 'sealed_requests': [], 'opened_wraps': []})
         log(s, 'You restored your identity from a backup')
         save(s)
     sync_soon()
@@ -513,24 +529,30 @@ def _past():
     return int(time.time()) - secrets.randbelow(2 * 86400)
 
 
+def wrap_seal(to_pk, seal):
+    if not verify_event(seal) or seal.get('kind') != 13:
+        raise Problem(400, 'Invalid friend seal.')
+    esk = new_secret()
+    return sign_event(1059, nip44_encrypt(conversation_key(esk, to_pk), json.dumps(seal)), [('p', to_pk)], esk, _past())
+
+
 def gift_wrap(to_pk, content):
     sk, pk = box_key()
     rumor = {'pubkey': pk, 'created_at': int(time.time()), 'kind': HELLO_KIND, 'tags': [['t', 'wizard-profile']], 'content': content}
     rumor['id'] = event_id(rumor)
     seal = sign_event(13, nip44_encrypt(conversation_key(sk, to_pk), json.dumps(rumor)), (), sk, _past())
-    esk = new_secret()
-    return sign_event(1059, nip44_encrypt(conversation_key(esk, to_pk), json.dumps(seal)), [('p', to_pk)], esk, _past())
+    return wrap_seal(to_pk, seal)
 
 
 def unwrap(wrap):
+    if not verify_event(wrap) or wrap.get('kind') != 1059 or [box_key()[1]] not in identity.tags(wrap, 'p'):
+        return None
     sk, _ = box_key()
     seal = json.loads(nip44_decrypt(conversation_key(sk, wrap['pubkey']), wrap['content']))
     if not verify_event(seal) or seal.get('kind') != 13:
         return None
     rumor = json.loads(nip44_decrypt(conversation_key(sk, seal['pubkey']), seal['content']))
-    if not isinstance(rumor, dict) or rumor.get('pubkey') != seal['pubkey'] or rumor.get('kind') != HELLO_KIND:
-        return None
-    return rumor
+    return validate_rumor(seal, rumor)
 
 
 def pair_tag(friend_pk):
@@ -697,7 +719,8 @@ def _text(v, name, limit, required=False):
 
 def _blank():
     return {'name': '', 'bio': '', 'picture': '', 'messenger': '', 'visibility': {**{s: 'private' for s in SECTIONS}, 'card': 'friends'}, 'hidden': [], 'uses': [],
-            'snapshot': None, 'friends': [], 'requests': [], 'activity': [], 'look_backup': None, 'wearing': None}
+            'snapshot': None, 'friends': [], 'requests': [], 'activity': [], 'look_backup': None, 'wearing': None,
+            'owner': None, 'identity_events': [], 'pending_actions': {}, 'sealed_requests': [], 'opened_wraps': []}
 
 
 def load():
@@ -712,7 +735,9 @@ def load():
     out['visibility'] = {k: vis.get(k) if vis.get(k) in LEVELS else 'private' for k in SECTIONS}
     out['visibility']['card'] = vis.get('card') if vis.get('card') in ('friends', 'public') else 'friends'
     for k, d in (('sync', None), ('shared_at', None), ('public_live', False), ('unshare', []), ('ignored', []),
-                 ('requests_since', 0), ('requests_checked', None), ('backed_up_at', None)):
+                 ('requests_since', 0), ('requests_checked', None), ('backed_up_at', None),
+                 ('owner', None), ('identity_events', []), ('pending_actions', {}),
+                 ('sealed_requests', []), ('opened_wraps', [])):
         out[k] = s.get(k, d) if isinstance(s, dict) else d
     # Friends and requests are Nostr IDs; older email-based entries (before 0.2) are dropped.
     out['friends'] = [f for f in out['friends'] if isinstance(f, dict) and re.fullmatch(r'[0-9a-f]{64}', str(f.get('pubkey', '')))]
@@ -957,8 +982,8 @@ def view_for(role, s=None):
     allowed = {'owner': LEVELS, 'friend': ('friends', 'public'), 'visitor': ('public',)}[role]
     snap = s['snapshot'] or {}
     card = s['visibility'].get('card', 'friends') in allowed
-    out = {'app': APP_ID, 'version': VERSION, 'viewer': role, 'npub': box_npub(),
-           'name': (s['name'] or 'A Wizard owner') if card else '', 'bio': s['bio'] if card else '',
+    out = {'app': APP_ID, 'version': VERSION, 'viewer': role, 'npub': npub_encode(s['owner']) if s.get('owner') else box_npub(),
+           'name': (s['name'] if s.get('owner') else wizard_name(s) + ' (unclaimed)') if card else '', 'bio': s['bio'] if card else '',
            'picture': s['picture'] if card else '', 'messenger': s['messenger'] if card and role != 'visitor' else '',
            'updated_at': s.get('shared_at') or snap.get('published_at')}
     hidden, uses = set(s['hidden']), set(s['uses'])
@@ -988,6 +1013,304 @@ def is_owner(headers):
     return bool(login) and (not OWNER_LOGINS or login in OWNER_LOGINS)
 
 
+# ---------- phone-owned person / box-owned inbox ----------
+
+def wizard_name(s):
+    name = s.get('name') or 'Someone'
+    return name if name.endswith("'s Wizard") else name + "'s Wizard"
+
+
+def resolve_key(pk):
+    """Fetch verified identity evidence; retain newest lists, even after expiry.
+
+    Expired/revoked known people must not silently turn back into box identities.
+    Transport is intentionally separate from the pure identity_resolve module.
+    """
+    s = load()
+    known = s.get('identity_events', [])
+    evs, _ = relay_query([{'authors': [pk], 'kinds': [0, identity.DEVICE_KIND], 'limit': 50}])
+    relevant = [e for e in evs if e.get('pubkey') == pk and verify_event(e)
+                and e['created_at'] <= int(time.time())
+                and (e.get('kind') == 0 or identity.tags(e, 'd') == [[identity.DEVICE_D]])]
+    meta, _ = identity.metadata(pk, known + relevant)
+    owners = [t[0] for t in identity.tags(meta or {}, 'p') if identity.HEX.fullmatch(str(t[0]))][:8]
+    if owners:
+        more, _ = relay_query([{'authors': owners, 'kinds': [0, identity.DEVICE_KIND], 'limit': 100}])
+        relevant += [e for e in more if e.get('pubkey') in owners and verify_event(e)
+                     and e['created_at'] <= int(time.time())
+                and (e.get('kind') == 0 or identity.tags(e, 'd') == [[identity.DEVICE_D]])]
+    with LOCK:
+        s = load()
+        groups = {}
+        for e in s.get('identity_events', []) + relevant:
+            key = (e['pubkey'], e['kind'])
+            groups.setdefault(key, []).append(e)
+        # Only verified evidence is persisted. Do not expire the newest list and resurrect an old one.
+        s['identity_events'] = [identity.newest(v) for v in groups.values()]
+        save(s)
+    return identity.resolve(pk, s['identity_events'], int(time.time()))
+
+
+def owner_authorized(s, role='inbox'):
+    if not s.get('owner'):
+        return True
+    ident = resolve_key(s['owner'])
+    return identity.allowed_device(ident['listing'], box_key()[1], role, int(time.time()))
+
+
+def require_owner(s, role='inbox'):
+    if not s.get('owner') or not owner_authorized(s, role):
+        raise Problem(409, 'The phone must renew or authorize this Wizard in its current device list.')
+
+
+def rekey_friends():
+    """Claims migrate stable local friend IDs to the person; inbox changes never change the person."""
+    snapshot = load()
+    resolved = [(f.get('id', f['pubkey']), resolve_key(f['pubkey'])) for f in snapshot['friends'] + snapshot['requests']]
+    by_id = dict(resolved)
+    with LOCK:
+        s = load()
+        changed = False
+        for key in ('friends', 'requests'):
+            unique = {}
+            for f in s[key]:
+                r = by_id.get(f.get('id', f['pubkey']))
+                if r:
+                    old = f['pubkey']
+                    f.update(pubkey=r['person'], npub=npub_encode(r['person']), inbox=r['inbox'], claimed=r['claimed'])
+                    if r['claimed']:
+                        if old != r['person']:
+                            f['aliases'] = sorted(set(f.get('aliases', []) + [old]))
+                        f['name'] = r['name']
+                    else:
+                        name = str(f.get('name') or r['name']).replace(' (unclaimed)', '')
+                        f['name'] = (name if name.endswith("'s Wizard") else name + "'s Wizard") + ' (unclaimed)'
+                    changed = changed or old != f['pubkey']
+                unique.setdefault(f['pubkey'], f)
+            s[key] = list(unique.values())
+        save(s)
+    return changed
+
+
+def validate_rumor(seal, rumor):
+    if not verify_event(seal) or seal.get('kind') != 13 or seal.get('tags') != []:
+        return None
+    if not isinstance(rumor, dict) or rumor.get('pubkey') != seal['pubkey'] or rumor.get('kind') != HELLO_KIND:
+        return None
+    try:
+        valid = rumor.get('id') == event_id(rumor)
+    except (ValueError, TypeError, KeyError):
+        return None
+    if not valid or 'sig' in rumor or type(rumor.get('created_at')) is not int:
+        return None
+    at = rumor['created_at']
+    if at < 0 or at > int(time.time()) + 60:
+        return None
+    resolved = resolve_key(seal['pubkey'])
+    if resolved['claimed']:
+        if not resolved['current']:
+            return None
+        if seal['pubkey'] != resolved['person'] and not identity.allowed_device(
+                resolved['listing'], seal['pubkey'], 'inbox', int(time.time()), at):
+            return None
+    return rumor
+
+
+def remember_request(s, rumor):
+    resolved = resolve_key(rumor['pubkey'])
+    pk = resolved['person']
+    known = {r['pubkey'] for r in s['requests'] + s['friends']} | set(s.get('ignored', []))
+    if pk in known or pk in (box_key()[1], s.get('owner')):
+        return
+    try:
+        body = json.loads(rumor['content'])
+    except (ValueError, TypeError):
+        return
+    if not isinstance(body, dict):
+        return
+    name = str(body.get('name') or resolved['name'])[:60]
+    if not resolved['claimed']:
+        name = name if name.endswith("'s Wizard") else name + "'s Wizard"
+        name += ' (unclaimed)'
+    s['requests'] = s['requests'][-199:] + [{'id': secrets.token_hex(4), 'pubkey': pk, 'npub': npub_encode(pk),
+        'inbox': resolved['inbox'], 'claimed': resolved['claimed'], 'name': name,
+        'picture': body.get('picture') if valid_picture(body.get('picture')) else '', 'at': now()}]
+    log(s, f'{name} added you as a friend')
+
+
+def _prepare(s, action):
+    token = secrets.token_hex(24)
+    action['expires'] = int(time.time()) + 600
+    s['pending_actions'] = {k: v for k, v in s.get('pending_actions', {}).items() if v['expires'] > time.time()}
+    if len(s['pending_actions']) >= 32:
+        raise Problem(429, 'Too many pending approvals. Complete one or wait ten minutes.')
+    s['pending_actions'][token] = action
+    save(s)
+    return token
+
+
+def _pending(s, body, purpose):
+    action = s.get('pending_actions', {}).get(body.get('token'))
+    if not action or action['expires'] < time.time() or action['purpose'] != purpose:
+        raise Problem(409, 'That approval expired or was already used. Try again.')
+    return action
+
+
+def _signed_exact(event, expected):
+    return verify_event(event) and {k: v for k, v in event.items() if k not in ('id', 'sig')} == expected
+
+
+def claim_prepare(body):
+    owner = npub_decode(body.get('npub'))
+    if owner == box_key()[1]:
+        raise Problem(400, 'The phone ID must be different from the Wizard key.')
+    previous = resolve_key(owner)['listing']
+    with LOCK:
+        s = load()
+        if s.get('owner') and s['owner'] != owner:
+            raise Problem(409, 'This Wizard already belongs to another phone ID.')
+        old = previous['event'] if previous else {}
+        tags = [t for t in old.get('tags', []) if not t or (t[0] not in ('d', 'expiration')
+                and not (t[0] == 'p' and len(t) > 1 and t[1] == box_key()[1]))]
+        if previous and box_key()[1] in previous['revoked']:
+            raise Problem(409, 'This Wizard was revoked. Claim a new device key instead.')
+        timestamp = int(time.time())
+        if old.get('created_at', 0) >= timestamp:
+            raise Problem(409, 'Wait one second before renewing the device list.')
+        event = {'pubkey': owner, 'kind': identity.DEVICE_KIND, 'created_at': timestamp, 'content': '',
+            'tags': [['d', identity.DEVICE_D], *tags, ['p', box_key()[1], RELAYS[0] if RELAYS else '', 'inbox', 'profile', 'messenger', 'agent'],
+                     ['expiration', str(timestamp + 90 * 86400)]]}
+        token = _prepare(s, {'purpose': 'claim', 'owner': owner, 'event': event})
+    return {'token': token, 'event': event}
+
+
+def claim_commit(body):
+    with LOCK:
+        s = load()
+        action = _pending(s, body, 'claim')
+        ev = body.get('event')
+        if not _signed_exact(ev, action['event']):
+            raise Problem(400, 'Phone signature does not match the prepared device list.')
+        if s.get('owner') and s['owner'] != ev['pubkey']:
+            raise Problem(409, 'This Wizard already belongs to another phone ID.')
+        current = resolve_key(ev['pubkey'])['listing']
+        if current and identity.newest([current['event'], ev])['id'] != ev['id']:
+            raise Problem(409, 'The device list changed during approval. Prepare it again.')
+        if not relay_publish([ev]).get(ev['id']):
+            raise Problem(502, 'No relay stored the device list. Retry while this approval is current.')
+        # Refresh state after identity lookup; do not clobber newer identity evidence.
+        s = load()
+        s['owner'] = ev['pubkey']
+        s['identity_events'] = [e for e in s['identity_events'] if not (e['pubkey'] == ev['pubkey'] and e['kind'] == identity.DEVICE_KIND)] + [ev]
+        s['pending_actions'].pop(body['token'], None)
+        save(s)
+    sync_soon()
+    return me()
+
+
+def friend_prepare(body):
+    npub = str(body.get('npub') or '')
+    target = resolve_key(npub_decode(npub))
+    if not target['inbox']:
+        raise Problem(409, 'That person has no current receiving Wizard.')
+    with LOCK:
+        s = load()
+        require_owner(s)
+        if target['person'] in (s['owner'], box_key()[1]):
+            raise Problem(400, 'That is your own ID.')
+        rumor = {'pubkey': s['owner'], 'created_at': int(time.time()), 'kind': HELLO_KIND,
+                 'tags': [['t', 'wizard-profile']], 'content': json.dumps({'name': s['name'] or 'A Wizard friend',
+                  'picture': s['picture'] if len(s['picture']) < 40000 else '', 'inbox': box_key()[1]})}
+        rumor['id'] = event_id(rumor)
+        seal = {'pubkey': s['owner'], 'created_at': _past(), 'kind': 13, 'tags': [], 'content': ''}
+        # Lookups above update evidence; preserve it rather than saving the old snapshot.
+        s = load()
+        token = _prepare(s, {'purpose': 'friend', 'owner': s['owner'], 'target': target['person'], 'inbox': target['inbox'],
+                             'name': _text(body.get('name'), 'name', 60), 'rumor': rumor, 'seal': seal})
+    return {'token': token, 'recipient': target['inbox'], 'rumor': rumor}
+
+
+def friend_seal(body):
+    with LOCK:
+        s = load()
+        action = _pending(s, body, 'friend')
+        require_owner(s)
+        ciphertext = body.get('ciphertext')
+        try:
+            raw = base64.b64decode(ciphertext, validate=True)
+            if not 99 <= len(raw) <= 90000 or raw[0] != 2:
+                raise ValueError()
+        except (TypeError, ValueError):
+            raise Problem(400, 'Expected NIP-44 v2 ciphertext from the phone.')
+        action['seal']['content'] = ciphertext
+        s = load()
+        s['pending_actions'][body['token']] = action
+        save(s)
+    return {'event': action['seal']}
+
+
+def friend_commit(body):
+    with LOCK:
+        s = load()
+        action = _pending(s, body, 'friend')
+        require_owner(s)
+        if action['owner'] != s['owner'] or not action['seal']['content'] or not _signed_exact(body.get('event'), action['seal']):
+            raise Problem(400, 'Phone signature does not match the prepared owner seal.')
+        target = resolve_key(action['target'])
+        if target['inbox'] != action['inbox']:
+            raise Problem(409, 'The recipient changed or revoked its inbox. Prepare a new request.')
+        wrap = wrap_seal(action['inbox'], body['event'])
+        if not relay_publish([wrap]).get(wrap['id']):
+            raise Problem(502, 'No relay stored the request. Retry this approval.')
+        s = load()
+        f = store_friend(s, target, action['name'])
+        s['pending_actions'].pop(body['token'], None)
+        save(s)
+    rep = sync()
+    return {'friend': f, 'sent': True, 'sync': rep, 'me': me()}
+
+
+def store_friend(s, target, name=''):
+    pk = target['person']
+    f = next((f for f in s['friends'] if f['pubkey'] == pk), None)
+    req = next((r for r in s['requests'] if r['pubkey'] == pk), {})
+    if not f:
+        f = {'id': secrets.token_hex(4), 'pubkey': pk, 'npub': npub_encode(pk), 'added_at': now()}
+        s['friends'].append(f)
+    display = name or req.get('name') or target['name']
+    if not target['claimed']:
+        display = display.replace(' (unclaimed)', '')
+        display = (display if display.endswith("'s Wizard") else display + "'s Wizard") + ' (unclaimed)'
+    f.update(name=display, picture=req.get('picture') or f.get('picture', ''), inbox=target['inbox'], claimed=target['claimed'])
+    s['requests'] = [r for r in s['requests'] if r['pubkey'] != pk]
+    s['unshare'] = [x for x in s.get('unshare', []) if x != pk]
+    return f
+
+
+def pending_requests():
+    s = load()
+    return {'requests': s.get('sealed_requests', [])}
+
+
+def open_request(body):
+    with LOCK:
+        s = load()
+        w = next((w for w in s.get('sealed_requests', []) if w['id'] == body.get('id')), None)
+        if not w or not s.get('owner') or [s['owner']] not in identity.tags(w, 'p'):
+            raise Problem(404, 'No queued owner-addressed request with that ID.')
+        rumor = validate_rumor(body.get('seal'), body.get('rumor'))
+        if not rumor:
+            raise Problem(400, 'Invalid decrypted owner request.')
+        # The authenticated browser supplies phone-decrypted plaintext. No server owner secret exists.
+        s = load()
+        remember_request(s, rumor)
+        s['identity_events'] = load()['identity_events']
+        s['opened_wraps'] = (s.get('opened_wraps', []) + [w['id']])[-1000:]
+        s['sealed_requests'] = [q for q in s['sealed_requests'] if q['id'] != w['id']]
+        save(s)
+    return me()
+
+
 # ---------- sharing over Nostr ----------
 # Public parts: one signed kind 30078 event (d=wizard-profile) anyone with your npub can read.
 # Friends' parts: one kind 30078 event per friend, NIP-44 encrypted to that friend, under a d tag only the two of you
@@ -999,21 +1322,33 @@ _sync_lock = threading.Lock()
 
 def share_events(s):
     evs = []
+    if not owner_authorized(s, 'profile'):
+        return [], False
+    owner_tags = [('p', s['owner'])] if s.get('owner') else []
+    # This is a device profile, never the person's kind 0. Owner key stays on phone.
+    evs.append(sign_event(0, json.dumps({'name': wizard_name(s), 'picture': s['picture']}), owner_tags))
     pub = view_for('visitor', s)
     has_public = any(pub[p] for p in SECTIONS) or s['visibility'].get('card') == 'public'
     if has_public or s.get('public_live'):
-        evs.append(sign_event(PROFILE_KIND, json.dumps(pub, separators=(',', ':')), [('d', 'wizard-profile'), ('t', 'wizard-profile')]))
+        evs.append(sign_event(PROFILE_KIND, json.dumps(pub, separators=(',', ':')),
+                              [('d', 'wizard-profile'), ('t', 'wizard-profile'), *owner_tags]))
     view = json.dumps(view_for('friend', s), separators=(',', ':'))
     for f in s['friends']:
-        evs.append(sign_event(PROFILE_KIND, nip44_encrypt(conversation_key(box_key()[0], f['pubkey']), view), [('d', pair_tag(f['pubkey']))]))
-    for pk in s.get('unshare', []):            # someone you removed: their copy is replaced by an encrypted "removed"
-        evs.append(sign_event(PROFILE_KIND, nip44_encrypt(conversation_key(box_key()[0], pk), '{"removed":true}'), [('d', pair_tag(pk))]))
+        inbox = resolve_key(f['pubkey'])['inbox']
+        if inbox:
+            evs.append(sign_event(PROFILE_KIND, nip44_encrypt(conversation_key(box_key()[0], inbox), view),
+                                  [('d', pair_tag(inbox)), *owner_tags]))
+    for pk in s.get('unshare', []):
+        inbox = resolve_key(pk)['inbox']
+        if inbox:
+            evs.append(sign_event(PROFILE_KIND, nip44_encrypt(conversation_key(box_key()[0], inbox), '{"removed":true}'),
+                                  [('d', pair_tag(inbox)), *owner_tags]))
     return evs, has_public
-
 
 def sync(extra=()):
     """Push what you share to the relays now. Returns a short report the screen can show."""
     with _sync_lock:
+        rekey_friends()
         with LOCK:
             s = load()
             evs, has_public = share_events(s)
@@ -1050,37 +1385,38 @@ def _quiet(fn, *a):
 
 
 def check_requests():
-    """Gift-wrapped friend requests sent to your Nostr ID since the last look."""
-    with LOCK:
-        since = int(load().get('requests_since') or 0)
-    evs, reached = relay_query([{'kinds': [1059], '#p': [box_key()[1]], 'since': max(0, since - 3 * 86400), 'limit': 200}])
-    found = []
+    """Box inbox is unattended; phone-addressed transition envelopes wait for explicit opening."""
+    rekey_friends()
+    s = load()
+    since = int(s.get('requests_since') or 0)
+    recipients = [box_key()[1]] + ([s['owner']] if s.get('owner') else [])
+    evs, reached = relay_query([{'kinds': [1059], '#p': recipients, 'since': max(0, since - 3 * 86400), 'limit': 200}])
+    found, queued = [], []
     for w in evs:
-        r = _quiet(unwrap, w)
-        if not r:
+        if not verify_event(w) or w.get('kind') != 1059:
             continue
-        try:
-            body = json.loads(r['content'])
-        except (ValueError, TypeError):
-            continue
-        found.append((r['pubkey'], body if isinstance(body, dict) else {}, int(r.get('created_at') or 0)))
+        if [box_key()[1]] in identity.tags(w, 'p'):
+            r = _quiet(unwrap, w)
+            if r:
+                found.append(r)
+        elif s.get('owner') and [s['owner']] in identity.tags(w, 'p'):
+            queued.append(w)
     with LOCK:
         s = load()
-        mine, friends = box_key()[1], {f['pubkey'] for f in s['friends']}
-        known = {r['pubkey'] for r in s['requests']}
-        for pk, body, at in sorted(found, key=lambda x: x[2]):
-            if pk == mine or pk in friends or pk in known or pk in set(s.get('ignored', [])):
-                continue
-            s['requests'] = s['requests'][-19:] + [{'pubkey': pk, 'npub': npub_encode(pk), 'name': str(body.get('name') or '')[:60] or npub_encode(pk)[:12] + '…',
-                                                   'picture': body.get('picture') if valid_picture(body.get('picture')) else '', 'at': now()}]
-            known.add(pk)
-            log(s, f"{s['requests'][-1]['name']} added you as a friend")
-        if reached:
+        for rumor in sorted(found, key=lambda r: r['created_at']):
+            remember_request(s, rumor)
+        known = set(s.get('opened_wraps', [])) | {w['id'] for w in s['sealed_requests']}
+        for w in queued:
+            if w['id'] not in known and len(s['sealed_requests']) < 200:
+                s['sealed_requests'].append(w)
+                known.add(w['id'])
+        # Keep full history query while phone backlog is saturated; never skip overflow.
+        if reached and len(s['sealed_requests']) < 200:
             s['requests_since'] = int(time.time())
         s['requests_checked'] = now()
+        s['identity_events'] = load()['identity_events']
         save(s)
     return me()
-
 
 def background():
     n = 0
@@ -1100,29 +1436,24 @@ def background():
 def add_friend(body):
     if not isinstance(body, dict):
         raise Problem(400, 'Expected an object.')
+    if load().get('owner'):
+        raise Problem(409, 'Friend adds and acceptances need your phone approval. Use the signing flow.')
     m = re.search(r'npub1[02-9ac-hj-np-z]{20,}', str(body.get('npub') or body.get('code') or '').lower())
     if not m:
         raise Problem(400, 'Paste their Nostr ID. It starts with npub1.')
-    pk = npub_decode(m.group(0))
-    if pk == box_key()[1]:
+    target = resolve_key(npub_decode(m.group(0)))
+    pk = target['inbox']
+    if not pk:
+        raise Problem(409, 'That person has no current receiving Wizard.')
+    if target['person'] == box_key()[1]:
         raise Problem(400, 'That is your own Nostr ID.')
     with LOCK:
         s = load()
-        f = next((f for f in s['friends'] if f['pubkey'] == pk), None)
-        req = next((r for r in s['requests'] if r['pubkey'] == pk), {})
-        if not f:
-            f = {'id': secrets.token_hex(4), 'pubkey': pk, 'npub': npub_encode(pk), 'added_at': now()}
-            s['friends'].append(f)
-        f['name'] = _text(body.get('name'), 'name', 60) or req.get('name') or f.get('name') or f['npub'][:12] + '…'
-        f['picture'] = req.get('picture') or f.get('picture', '')
-        s['requests'] = [r for r in s['requests'] if r['pubkey'] != pk]
-        s['unshare'] = [x for x in s.get('unshare', []) if x != pk]
-        log(s, f"Added {f['name']}")
+        f = store_friend(s, target, _text(body.get('name'), 'name', 60))
         save(s)
         hello = {'name': s['name'] or 'A Wizard friend', 'picture': s['picture'] if len(s['picture']) < 40000 else ''}
     rep = sync([gift_wrap(pk, json.dumps(hello))])
     return {'friend': f, 'sent': rep.get('reached', 0) > 0, 'me': me()}
-
 
 def remove_friend(fid):
     with LOCK:
@@ -1188,32 +1519,60 @@ def clean_remote(p, f, viewer):
 
 
 def friend_profile(fid):
-    f = next((f for f in load()['friends'] if f['id'] == fid), None)
+    rekey_friends()
+    s = load()
+    f = next((f for f in s['friends'] if f['id'] == fid), None)
     if not f:
         raise Problem(404, 'No friend with that id.')
-    tag = pair_tag(f['pubkey'])
-    evs, reached = relay_query([{'kinds': [PROFILE_KIND], 'authors': [f['pubkey']], '#d': [tag, 'wizard-profile'], 'limit': 10}])
+    resolved = resolve_key(f['pubkey'])
+    authors = resolved['profiles']
+    if resolved['listing'] and resolved['current']:
+        # Revoked-but-retained device entries can authenticate pre-cutoff history, never new copies.
+        authors = [pk for pk, roles in resolved['listing']['devices'].items() if 'profile' in roles]
+    if not authors:
+        return clean_remote({}, f, 'none')
+    # Stock peers may still encrypt to our phone. Their opaque pair d cannot be
+    # derived without the owner ECDH key. Ask for recent copies and let the phone
+    # try opening them; do NOT export or reproduce the owner conversation key.
+    filters = [{'kinds': [PROFILE_KIND], 'authors': authors, 'limit': 100}]
+    evs, reached = relay_query(filters)
     if not reached:
         raise Problem(502, 'Could not reach any Nostr relay. Check the internet connection of your Wizard.')
     latest = {}
-    for ev in evs:                                    # relay_query already checked every signature
-        d = next((t[1] for t in ev.get('tags', []) if len(t) >= 2 and t[0] == 'd'), '')
-        if ev.get('pubkey') == f['pubkey'] and (d not in latest or ev['created_at'] > latest[d]['created_at']):
-            latest[d] = ev
+    for ev in evs:
+        if ev.get('kind') != PROFILE_KIND or not verify_event(ev) or not identity.profile_trusted(ev, resolved, int(time.time())):
+            continue
+        d = identity.tags(ev, 'd')
+        if len(d) == 1:
+            key = (ev['pubkey'], d[0][0])
+            latest[key] = identity.newest([ev, latest[key]]) if key in latest else ev
+    copies = sorted(latest.values(), key=lambda e: (-e['created_at'], e['id']))
+    private = [e for e in copies if identity.tags(e, 'd') == [[pair_tag(e['pubkey'])]]]
+    public = [e for e in copies if identity.tags(e, 'd') == [['wizard-profile']]]
     p, viewer = None, 'none'
-    if latest.get(tag, {}).get('content'):
+    for ev in private:
         try:
-            p, viewer = json.loads(nip44_decrypt(conversation_key(box_key()[0], f['pubkey']), latest[tag]['content'])), 'friend'
+            p = json.loads(nip44_decrypt(conversation_key(box_key()[0], ev['pubkey']), ev['content']))
+            if not isinstance(p, dict) or p.get('removed'):
+                p = None
+            else:
+                viewer = 'friend'
+            break
         except (ValueError, TypeError):
-            p = None
-        if isinstance(p, dict) and p.get('removed'):   # they removed you: only their public parts remain
-            p, viewer = None, 'none'
-    if p is None and latest.get('wizard-profile'):
+            continue
+    if p is None and public:
         try:
-            p, viewer = json.loads(latest['wizard-profile']['content']), 'visitor'
+            p, viewer = json.loads(public[0]['content']), 'visitor'
         except (ValueError, TypeError):
             p = None
     out = clean_remote(p if isinstance(p, dict) else {}, f, viewer)
+    if not resolved['claimed']:
+        # An arbitrary box-signed content.name cannot promote itself to a person.
+        name = out['name'].replace(' (unclaimed)', '')
+        out['name'] = (name if name.endswith("'s Wizard") else name + "'s Wizard") + ' (unclaimed)'
+    # Do not prompt for unrelated ciphertext if a current box-addressed copy exists.
+    if s.get('owner') and not private:
+        out['sealed_profiles'] = [e for e in copies if identity.tags(e, 'd') != [['wizard-profile']]][:20]
     with LOCK:
         s = load()
         for x in s['friends']:
@@ -1224,10 +1583,40 @@ def friend_profile(fid):
     return out
 
 
+def open_profile(fid, body):
+    s = load()
+    if not s.get('owner'):
+        raise Problem(409, 'Only phone-addressed copies need opening.')
+    f = next((f for f in s['friends'] if f['id'] == fid), None)
+    ev = body.get('event')
+    if not f:
+        raise Problem(404, 'No friend with that id.')
+    resolved = resolve_key(f['pubkey'])
+    if not verify_event(ev) or ev.get('kind') != PROFILE_KIND or not identity.profile_trusted(ev, resolved, int(time.time())):
+        raise Problem(400, 'Untrusted profile signer or revoked device.')
+    try:
+        p = json.loads(body.get('plaintext'))
+    except (ValueError, TypeError):
+        raise Problem(400, 'Expected phone-decrypted profile JSON.')
+    if not isinstance(p, dict):
+        raise Problem(400, 'Expected a profile object.')
+    if p.get('removed'):
+        out = friend_profile(fid)
+        out.pop('sealed_profiles', None)
+        return out
+    out = clean_remote(p, f, 'friend')
+    if not resolved['claimed']:
+        name = out['name'].replace(' (unclaimed)', '')
+        out['name'] = (name if name.endswith("'s Wizard") else name + "'s Wizard") + ' (unclaimed)'
+    return out
+
 def me():
     s = load()
     return {**{k: s[k] for k in ('name', 'bio', 'picture', 'messenger', 'visibility', 'hidden', 'uses', 'snapshot', 'friends', 'requests', 'wearing')},
-            'npub': box_npub(), 'look_saved': bool(s.get('look_backup')), 'sync': s.get('sync'), 'shared_at': s.get('shared_at'),
+            'npub': npub_encode(s['owner']) if s.get('owner') else box_npub(),
+            'box_npub': box_npub(), 'owner_npub': npub_encode(s['owner']) if s.get('owner') else None,
+            'sealed_requests': len(s.get('sealed_requests', [])), 'identity_name': s['name'] if s.get('owner') else wizard_name(s) + ' (unclaimed)',
+            'look_saved': bool(s.get('look_backup')), 'sync': s.get('sync'), 'shared_at': s.get('shared_at'),
             'requests_checked': s.get('requests_checked'), 'relays': RELAYS, 'backed_up_at': s.get('backed_up_at'),
             'activity': list(reversed(s['activity'][-20:])), 'shell_repo': SHELL_REPO}
 
@@ -1396,6 +1785,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {'ok': True, 'app': APP_ID, 'version': VERSION})
             if path == '/api/me':
                 return self.send(200, me())
+            if path == '/api/identity/pending':
+                return self.send(200, pending_requests())
             if path == '/api/preview':
                 return self.send(200, view_for('friend' if q.get('as', [''])[0] == 'friend' else 'visitor'))
             if path == '/api/icons':
@@ -1425,6 +1816,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/mcp':
                 out = rpc(body)
                 return self.send(202 if out is None else 200, out)
+            actions = {'/api/identity/claim/prepare': claim_prepare, '/api/identity/claim': claim_commit,
+                       '/api/friends/prepare': friend_prepare, '/api/friends/seal': friend_seal,
+                       '/api/friends/commit': friend_commit, '/api/requests/open': open_request}
+            if path in actions:
+                return self.send(200, actions[path](body))
+            m = re.fullmatch(r'/api/friends/([0-9a-f]{8})/profile/open', path)
+            if m:
+                return self.send(200, open_profile(m.group(1), body))
             if path == '/api/publish':
                 return self.send(200, publish(body))
             if path == '/api/friends':

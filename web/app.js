@@ -11,6 +11,8 @@ const LEVEL_ICON = {
   friends: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="9" r="3"/><circle cx="17" cy="10" r="2.4"/><path d="M3.5 19c.9-3 3-4.6 5.5-4.6s4.6 1.6 5.5 4.6M15 15.2c2.6-.4 4.6 1 5.5 3.8"/></svg>',
   public: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.4 3.6 5.2 3.6 8.5s-1.2 6.1-3.6 8.5c-2.4-2.4-3.6-5.2-3.6-8.5s1.2-6.1 3.6-8.5z"/></svg>',
 };
+const IDENTITY = ProfilesIdentity.create({ api });
+let PHONE = { unavailable: true };
 let ME = null, TAB = 'me', FRIEND = null, TRY = null, tryTimer = 0, busy = false, REPORT = null, INSTALLED = [];
 
 function h(tag, attrs = {}, ...kids) {
@@ -24,7 +26,7 @@ function h(tag, attrs = {}, ...kids) {
   for (const c of kids.flat()) if (c != null && c !== false) el.append(c.nodeType ? c : document.createTextNode(String(c)));
   return el;
 }
-function say(text, kind = '') { const s = $('status'); s.classList.toggle('wz-sr', !kind); s.dataset.kind = kind; s.textContent = text; if (kind) { clearTimeout(say.t); say.t = setTimeout(() => { s.textContent = ''; s.classList.add('wz-sr'); }, 5000); } }
+function say(text, kind = '') { const s = $('status'); s.classList.toggle('wz-sr', !kind); s.dataset.kind = kind; s.classList.toggle('note', kind === 'note'); s.textContent = text; if (kind) { clearTimeout(say.t); say.t = setTimeout(() => { s.textContent = ''; s.classList.add('wz-sr'); }, 5000); } }
 async function api(path, method = 'GET', body) {
   const r = await fetch(path, { method, cache: 'no-store', credentials: 'same-origin', ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
   let j = {}; try { j = await r.json(); } catch (_) {}
@@ -105,13 +107,12 @@ async function localFacts() {
 }
 const SKIN_NAMES = { nebula: 'Nebula', grove: 'Grove', tide: 'Tide', ember: 'Ember', signal: 'Signal', obsidian: 'Dark', 'obsidian-light': 'Light', landscapes: 'Landscapes' };
 function currentSkin() {
-  // What Wizard wears right now: the shell's picker (parent or top), then the skin pushed into this frame, then this
-  // device's saved choice.
+  // Shared theme is authoritative; old shells can still supply their picker/appearance value.
   let S = null;
   for (const w of [shell(), (() => { try { return top !== window ? top : null; } catch (_) { return null; } })()]) { try { if (w?.WosSkin) { S = w.WosSkin; break; } } catch (_) {} }
   let id = S?.current || '';
   if (!id && window.WizardTheme?.connected) id = window.WizardTheme.current?.skin || '';
-  if (!id) { try { id = localStorage.getItem('wos.skin') || ''; } catch (_) {} }
+  id = window.WizardApp?.theme.get()?.skin || id;
   id = id || 'nebula';
   return { id, name: S?.list?.find(x => x.id === id)?.name || SKIN_NAMES[id] || id };
 }
@@ -274,11 +275,24 @@ function renderMe() {
     h('button', { type: 'button', class: 'pf-btn', onclick: () => preview('friend') }, 'See what friends see'),
     h('button', { type: 'button', class: 'pf-btn', onclick: () => preview('public') }, 'See what everyone sees')));
 }
+async function claimWizard(e) {
+  const button = e.currentTarget; button.disabled = true;
+  try { ME = await IDENTITY.claim(); render(); say('This Wizard is now claimed by your phone ID.', 'note'); }
+  catch (err) { say(err.message, 'error'); button.disabled = false; }
+}
 function idCard() {
+  if (ME.owner_npub) return h('div', { class: 'pf-id-wrap' },
+    h('div', { class: 'pf-id' }, h('div', { class: 'wz-main' }, h('small', { text: 'Your Wizard ID · phone' }),
+      h('code', { class: 'pf-npub', text: shortNpub(ME.owner_npub), title: ME.owner_npub })),
+      h('button', { type: 'button', class: 'pf-chip on', onclick: e => copy(e.currentTarget, ME.owner_npub, 'Copy') }, 'Copy')),
+    h('p', { class: 'pf-hint', text: `${ME.name ? ME.name + "'s" : 'Your'} Wizard receives for this ID. Your person key stays on your phone.` }),
+    PHONE.npub === ME.owner_npub ? h('button', { type: 'button', class: 'pf-btn pf-claim', onclick: claimWizard }, 'Let this Wizard receive for you') : null);
   const cp = h('button', { type: 'button', class: 'pf-chip on', onclick: e => copy(e.currentTarget, ME.npub, 'Copy') }, 'Copy');
   const safe = !!ME.backed_up_at;
   return h('div', { class: 'pf-id-wrap' },
-    h('div', { class: 'pf-id' }, h('div', { class: 'wz-main' }, h('small', { text: 'Your Nostr ID' }), h('code', { class: 'pf-npub', title: ME.npub, text: shortNpub(ME.npub) })), cp),
+    PHONE.npub ? h('button', { type: 'button', class: 'pf-btn go pf-claim', onclick: claimWizard }, 'Claim this Wizard')
+      : h('p', { class: 'pf-hint', text: 'Set up your Wizard ID on your phone to claim this Wizard' }),
+    h('div', { class: 'pf-id' }, h('div', { class: 'wz-main' }, h('small', { text: 'Your Wizard · unclaimed' }), h('code', { class: 'pf-npub', title: ME.npub, text: shortNpub(ME.npub) })), cp),
     h('button', { type: 'button', class: 'pf-safe' + (safe ? ' ok' : ''), onclick: () => identitySheet() },
       h('span', { class: 'pf-safe-ic', 'aria-hidden': 'true', html: safe ? ICON.shieldOk : ICON.shield }),
       h('span', { class: 'wz-main' }, h('b', { text: safe ? 'Identity backed up' : 'Back up your identity' }),
@@ -297,12 +311,13 @@ function sheet(label, ...kids) {
     closed = true;
     el.querySelectorAll('input, textarea').forEach(i => { i.value = ''; });
     el.querySelectorAll('.pf-backup').forEach(i => { i.textContent = ''; });
-    el.replaceChildren(); el.remove(); document.removeEventListener('keydown', esc);
+    el.replaceChildren(); el.remove(); document.removeEventListener('keydown', esc); backHandle?.release();
   };
   const esc = e => { if (e.key === 'Escape') close(); };
   const el = h('div', { class: 'pf-crop pf-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': label, onclick: e => { if (e.target === el) close(); } },
     h('div', { class: 'pf-crop-card pf-sheet-card' }, h('span', { class: 'pf-grabber', 'aria-hidden': 'true' }),
       h('button', { type: 'button', class: 'pf-x', 'aria-label': 'Close', onclick: () => close(), html: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>' }), ...kids));
+  const backHandle = window.WizardApp?.back.push(() => { close(); return true; });
   document.addEventListener('keydown', esc);
   document.body.append(el);
   return { el, close, card: el.firstChild, get closed() { return closed; } };
@@ -442,15 +457,20 @@ function renderFriends() {
   const addBtn = h('button', { type: 'submit', class: 'pf-btn go' }, 'Add');
   v.append(h('form', { class: 'pf-card pf-add', onsubmit: async e => {
     e.preventDefault(); addBtn.disabled = true; addBtn.textContent = 'Adding…';
-    try { await added(await api('api/friends', 'POST', { npub: input.value })); }
+    try { await added(await IDENTITY.addFriend(ME, { npub: input.value })); }
     catch (err) { say(err.message, 'error'); addBtn.disabled = false; addBtn.textContent = 'Add'; }
   } }, h('div', { class: 'pf-card-h' }, h('div', { class: 'wz-main' }, h('b', { text: 'Add a friend' }), h('small', { text: 'Their Nostr ID is all you need' }))),
     h('div', { class: 'pf-add-row' }, input, addBtn)));
+  if (ME.sealed_requests) v.append(h('button', { type: 'button', class: 'pf-btn go', onclick: async e => {
+    e.currentTarget.disabled = true;
+    try { ME = await IDENTITY.openRequests(ME, next => { ME = next; }); render(); }
+    catch (err) { render(); say(err.message, 'error'); }
+  } }, `Open ${ME.sealed_requests} sealed requests`));
   if (ME.requests.length) {
     const reqs = h('ul', { class: 'wz-list' });
     for (const r of ME.requests) reqs.append(h('li', { class: 'pf-item' }, avatar(r, 'sm'),
       h('div', { class: 'wz-main' }, h('b', { text: r.name }), h('small', { text: `Added you · ${shortNpub(r.npub)}` })),
-      h('button', { type: 'button', class: 'pf-chip on', onclick: async e => { e.currentTarget.disabled = true; try { await added(await api('api/friends', 'POST', { npub: r.npub, name: r.name })); } catch (err) { say(err.message, 'error'); } } }, 'Add back'),
+      h('button', { type: 'button', class: 'pf-chip on', onclick: async e => { const button = e.currentTarget; button.disabled = true; try { await added(await IDENTITY.addFriend(ME, { npub: r.npub, name: r.name })); } catch (err) { say(err.message, 'error'); button.disabled = false; } } }, 'Add back'),
       h('button', { type: 'button', class: 'pf-chip', onclick: async () => { ME = await api('api/requests/dismiss', 'POST', { npub: r.npub }); render(); } }, 'Ignore')));
     v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Added you'), reqs));
   }
@@ -461,7 +481,7 @@ function renderFriends() {
   v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Friends', ME.friends.length ? h('span', { class: 'wz-count', text: String(ME.friends.length) }) : null),
     ME.friends.length ? list : h('p', { class: 'pf-hint', text: 'No friends yet. Send someone your Nostr ID, or paste theirs above.' })));
   v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Give friends your ID'), idCard(),
-    h('p', { class: 'pf-hint', text: 'Nobody can reach your Wizard with it. Friends get only what you share, encrypted for them, through Nostr.' }),
+    h('p', { class: 'pf-hint', text: 'Friends receive only what you choose, encrypted through Nostr. Your Wizard stays private.' }),
     h('div', { class: 'pf-row-acts' }, h('button', { type: 'button', class: 'pf-btn', onclick: checkNow }, 'Check for new friends'),
       ME.requests_checked ? h('small', { class: 'pf-when', text: `Checked ${ago(ME.requests_checked)}` }) : null)));
 }
@@ -496,6 +516,11 @@ function renderFriend() {
   v.append(h('div', { class: 'pf-who' }, avatar(p, 'lg'),
     h('div', { class: 'wz-main' }, h('b', { text: p.name || f.name || 'Someone' }), h('small', { text: p.bio || (p.updated_at ? `Updated ${ago(p.updated_at)}` : '') }),
       p.npub ? h('code', { class: 'pf-npub sm', title: p.npub, text: shortNpub(p.npub) }) : null)));
+  if (p.sealed_profiles?.length && !mine) v.append(h('button', { type: 'button', class: 'pf-btn go', onclick: async e => {
+    const button = e.currentTarget; button.disabled = true;
+    try { FRIEND.profile = await IDENTITY.openProfile(ME, f.id, p); renderFriend(); }
+    catch (err) { say(err.message, 'error'); button.disabled = false; }
+  } }, 'Open sealed profile on your phone'));
   if (p.messenger && !mine) v.append(h('div', { class: 'pf-row-acts' }, h('a', { class: 'pf-btn go', href: '/messenger/' }, 'Message in Messenger'),
     h('button', { type: 'button', class: 'pf-chip', onclick: e => copy(e.currentTarget, p.messenger, 'Copy Messenger address') }, 'Copy Messenger address')));
   if (!p.build && !p.skin && !p.apps) {
@@ -556,7 +581,7 @@ async function putMySkin(css) {
 function applySkin(id) {
   const S = shell()?.WosSkin;
   if (S?.list?.some(s => s.id === id)) S.set(id);
-  else try { localStorage.setItem('wos.skin', id); } catch (_) {}
+  else throw new Error('Open Profiles inside your Wizard to change your look.');
 }
 
 /* ---------- Try on a build ---------- */
@@ -595,7 +620,7 @@ function show(tab) {
 }
 function render() {
   if (!ME) return;
-  $('req-dot').hidden = !ME.requests.length;
+  $('req-dot').hidden = !ME.requests.length && !ME.sealed_requests;
   $('sub').textContent = '';
   if (TAB === 'me') renderMe(); else if (TAB === 'friends') renderFriends(); else renderFriend();
 }
@@ -603,7 +628,12 @@ for (const b of document.querySelectorAll('.pf-tabs button')) b.onclick = () => 
 window.__wizardCloseOverlay = () => { if (TAB === 'friend') { show(FRIEND?.preview ? 'me' : 'friends'); return true; } return false; };
 
 (async () => {
-  try { ME = await api('api/me'); show('me'); tryStatus(); refresh(); }
+  try {
+    await window.WizardApp?.ready({ name: 'profiles', version: '0.6.0' });
+    PHONE = await IDENTITY.info();
+    ME = await api('api/me'); show('me'); tryStatus(); refresh();
+    window.WizardApp?.back.register({ canGoBack: () => TAB === 'friend', back: () => window.__wizardCloseOverlay() });
+  }
   catch (e) { say(e.message, 'error'); }
 })();
 document.addEventListener('visibilitychange', () => { if (!document.hidden && ME) refresh(); });

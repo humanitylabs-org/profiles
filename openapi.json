@@ -2,8 +2,8 @@
  "openapi": "3.0.3",
  "info": {
   "title": "Wizard Profiles",
-  "version": "0.5.1",
-  "description": "Owner-only API. Share your look, build and App Store apps as Only you, Friends or Everyone through Nostr relays; friends are Nostr IDs."
+  "version": "0.6.0",
+  "description": "Owner-only API. The phone Wizard ID is the person; the existing app key is a revocable inbox/profile device. Unsigned owner events are approved through the shared WizardApp.identity bridge; no owner key reaches this server."
  },
  "paths": {
   "/healthz": {
@@ -26,7 +26,8 @@
      "403": {
       "description": "Not the owner"
      }
-    }
+    },
+    "description": "Includes person npub (owner when claimed), box_npub (device/inbox), owner_npub or null, identity_name (unclaimed label), and sealed_requests count. The server never returns an owner secret."
    },
    "put": {
     "summary": "Owner: change name, bio, visibility {build|skin|apps: private|friends|public}, hidden or uses app ids",
@@ -205,7 +206,8 @@
      "201": {
       "description": "{friend, sent, me}"
      }
-    }
+    },
+    "description": "Unclaimed Wizards only. Claimed owners use prepare \u2192 phone encrypt \u2192 seal \u2192 phone sign \u2192 commit. This endpoint returns 409 rather than downgrading to box signing."
    }
   },
   "/api/friends/{id}": {
@@ -248,7 +250,8 @@
      "502": {
       "description": "Their box did not answer"
      }
-    }
+    },
+    "description": "Checks box-signed copies from profile-role devices with owner p-tag for claimed people. May include sealed_profiles for explicit phone opening of stock copies addressed to the owner. Unclaimed peers are always labelled as unclaimed Wizards."
    }
   },
   "/api/requests/dismiss": {
@@ -339,10 +342,13 @@
          "password": {
           "type": "string",
           "minLength": 10
-          },
-          "format": {
+         },
+         "format": {
           "type": "string",
-          "enum": ["nsec", "ncryptsec"],
+          "enum": [
+           "nsec",
+           "ncryptsec"
+          ],
           "default": "ncryptsec"
          }
         },
@@ -358,7 +364,8 @@
      "400": {
       "description": "Refused, with a plain-English reason"
      }
-    }
+    },
+    "description": "Exports only the existing Wizard DEVICE key, never the phone identity. The claimed UI does not call this a person backup. Existing explicit raw/encrypted export and owner-only checks remain."
    }
   },
   "/api/identity/confirm": {
@@ -415,7 +422,542 @@
      "400": {
       "description": "Refused, with a plain-English reason"
      }
+    },
+    "description": "Unclaimed Wizard device-key restore only. Claimed Wizards return 409 to avoid silently replacing a delegated key. Restoring an unclaimed key invalidates outstanding approvals and queued owner envelopes."
+   }
+  },
+  "/api/identity/claim/prepare": {
+   "post": {
+    "summary": "Prepare phone-signed device list",
+    "description": "Preserves other devices and revocations, adds this box with inbox/profile/messenger/agent roles; ~90-day expiration. Single-use approval token expires after 10 minutes. No publication.",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "token": {
+           "type": "string"
+          },
+          "event": {
+           "$ref": "#/components/schemas/NostrEvent"
+          }
+         },
+         "required": [
+          "token",
+          "event"
+         ],
+         "additionalProperties": false
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Invalid event, signature, or input"
+     },
+     "401": {
+      "description": "Owner access required"
+     },
+     "403": {
+      "description": "Untrusted host/origin or owner"
+     },
+     "409": {
+      "description": "No current authorized device; wrong owner; stale, expired, or consumed approval"
+     },
+     "502": {
+      "description": "No relay acknowledged persistence"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "npub": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "npub"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
     }
+   }
+  },
+  "/api/identity/claim": {
+   "post": {
+    "summary": "Commit phone-signed device list",
+    "description": "Verifies exact prepared fields, concurrent list changes and owner signature. Saves claim only after a relay acknowledges. Re-shares box kind 0 with owner p-tag.",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Invalid event, signature, or input"
+     },
+     "401": {
+      "description": "Owner access required"
+     },
+     "403": {
+      "description": "Untrusted host/origin or owner"
+     },
+     "409": {
+      "description": "No current authorized device; wrong owner; stale, expired, or consumed approval"
+     },
+     "502": {
+      "description": "No relay acknowledged persistence"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "token": {
+          "type": "string"
+         },
+         "event": {
+          "$ref": "#/components/schemas/NostrEvent"
+         }
+        },
+        "required": [
+         "token",
+         "event"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/friends/prepare": {
+   "post": {
+    "summary": "Prepare owner friend add or acceptance",
+    "description": "Resolves PERSON to current inbox. Returns unsigned rumor and recipient hex for phone identity.nip44_encrypt. Acceptance uses the same flow.",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "token": {
+           "type": "string"
+          },
+          "recipient": {
+           "type": "string"
+          },
+          "rumor": {
+           "$ref": "#/components/schemas/NostrEvent"
+          }
+         },
+         "required": [
+          "token",
+          "recipient",
+          "rumor"
+         ],
+         "additionalProperties": false
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Invalid event, signature, or input"
+     },
+     "401": {
+      "description": "Owner access required"
+     },
+     "403": {
+      "description": "Untrusted host/origin or owner"
+     },
+     "409": {
+      "description": "No current authorized device; wrong owner; stale, expired, or consumed approval"
+     },
+     "502": {
+      "description": "No relay acknowledged persistence"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "npub": {
+          "type": "string"
+         },
+         "name": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "npub"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/friends/seal": {
+   "post": {
+    "summary": "Prepare owner seal from phone ciphertext",
+    "description": "Receives NIP-44 v2 ciphertext made by OWNER to recipient inbox. Returns unsigned kind 13 for identity.sign. Box cannot read or reproduce owner encryption.",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "event": {
+           "$ref": "#/components/schemas/NostrEvent"
+          }
+         },
+         "required": [
+          "event"
+         ],
+         "additionalProperties": false
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Invalid event, signature, or input"
+     },
+     "401": {
+      "description": "Owner access required"
+     },
+     "403": {
+      "description": "Untrusted host/origin or owner"
+     },
+     "409": {
+      "description": "No current authorized device; wrong owner; stale, expired, or consumed approval"
+     },
+     "502": {
+      "description": "No relay acknowledged persistence"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "token": {
+          "type": "string"
+         },
+         "ciphertext": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "token",
+         "ciphertext"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/friends/commit": {
+   "post": {
+    "summary": "Verify owner seal and gift-wrap it",
+    "description": "Verifies exact approved owner signature, sender authorization and unchanged recipient inbox. Builds throwaway gift wrap, publishes, pairs by PERSON. Refuses expired/replayed approval.",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Invalid event, signature, or input"
+     },
+     "401": {
+      "description": "Owner access required"
+     },
+     "403": {
+      "description": "Untrusted host/origin or owner"
+     },
+     "409": {
+      "description": "No current authorized device; wrong owner; stale, expired, or consumed approval"
+     },
+     "502": {
+      "description": "No relay acknowledged persistence"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "token": {
+          "type": "string"
+         },
+         "event": {
+          "$ref": "#/components/schemas/NostrEvent"
+         }
+        },
+        "required": [
+         "token",
+         "event"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/identity/pending": {
+   "get": {
+    "summary": "List phone-addressed sealed requests",
+    "description": "Verified queued 1059 envelopes addressed to owner. Client explicitly decrypts wrap then seal through identity.nip44_decrypt.",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "properties": {
+          "requests": {
+           "type": "array",
+           "items": {
+            "$ref": "#/components/schemas/NostrEvent"
+           }
+          }
+         },
+         "required": [
+          "requests"
+         ],
+         "additionalProperties": false
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Invalid event, signature, or input"
+     },
+     "401": {
+      "description": "Owner access required"
+     },
+     "403": {
+      "description": "Untrusted host/origin or owner"
+     },
+     "409": {
+      "description": "No current authorized device; wrong owner; stale, expired, or consumed approval"
+     },
+     "502": {
+      "description": "No relay acknowledged persistence"
+     }
+    }
+   }
+  },
+  "/api/requests/open": {
+   "post": {
+    "summary": "Validate phone-decrypted request",
+    "description": "Authenticated browser supplies phone-decrypted plaintext. Server verifies seal signature, rumor hash, sender resolution and revocation. Ciphertext/plaintext binding belongs to the trusted phone decrypt operation; no server owner secret exists.",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Invalid event, signature, or input"
+     },
+     "401": {
+      "description": "Owner access required"
+     },
+     "403": {
+      "description": "Untrusted host/origin or owner"
+     },
+     "409": {
+      "description": "No current authorized device; wrong owner; stale, expired, or consumed approval"
+     },
+     "502": {
+      "description": "No relay acknowledged persistence"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "id": {
+          "type": "string"
+         },
+         "seal": {
+          "$ref": "#/components/schemas/NostrEvent"
+         },
+         "rumor": {
+          "$ref": "#/components/schemas/NostrEvent"
+         }
+        },
+        "required": [
+         "id",
+         "seal",
+         "rumor"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    }
+   }
+  },
+  "/api/friends/{id}/profile/open": {
+   "post": {
+    "summary": "Validate phone-decrypted stock profile",
+    "description": "Stock peers encrypt to the phone. Client explicitly opens sealed_profiles through phone. Server validates signer, owner profile role/revocation, App Index/CSS and visibility. Authenticated browser supplies decrypted plaintext; not persisted.",
+    "responses": {
+     "200": {
+      "description": "Success",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object"
+        }
+       }
+      }
+     },
+     "400": {
+      "description": "Invalid event, signature, or input"
+     },
+     "401": {
+      "description": "Owner access required"
+     },
+     "403": {
+      "description": "Untrusted host/origin or owner"
+     },
+     "409": {
+      "description": "No current authorized device; wrong owner; stale, expired, or consumed approval"
+     },
+     "502": {
+      "description": "No relay acknowledged persistence"
+     }
+    },
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "event": {
+          "$ref": "#/components/schemas/NostrEvent"
+         },
+         "plaintext": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "event",
+         "plaintext"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    },
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  }
+ },
+ "components": {
+  "schemas": {
+   "NostrEvent": {
+    "type": "object",
+    "properties": {
+     "pubkey": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+     },
+     "created_at": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "kind": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+     },
+     "tags": {
+      "type": "array",
+      "items": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      }
+     },
+     "content": {
+      "type": "string"
+     },
+     "id": {
+      "type": "string"
+     },
+     "sig": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "pubkey",
+     "created_at",
+     "kind",
+     "tags",
+     "content"
+    ],
+    "additionalProperties": false,
+    "description": "Unsigned prepared events exclude id/sig; commit requires both, exact prepared fields, and a valid owner BIP-340 signature."
    }
   }
  }

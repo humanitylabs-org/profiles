@@ -6,22 +6,24 @@ public shell code anyone can fetch, a look only as sanitised CSS (the owner's My
 taps Publish, never live state.
 
 Identity is Nostr, never email. This Wizard has its own Nostr key (made on first start, kept in app-data): its npub
-is the profile's ID, friends are added by npub, and every friend request, profile request and profile answer is a
-Nostr event signed by the sender's key (NIP-98 for requests, a kind 30078 event for the answer), checked on arrival.
-Tailscale is only the private road between boxes, never the identity.
-
-Who may change the profile:
-  - box-local callers (the agent's MCP gateway)                                                    -> owner
-  - the owner's own Wizard screens (through Tailscale Serve on this box's private shell address)   -> owner
-Everyone else only reaches /api/friend/* and gets what their signed Nostr ID may see (friend) or the public parts.
+is the profile's ID and the only thing you give a friend. Nobody connects to your Wizard: what you share goes out as
+signed Nostr events on public relays. Public parts are one signed event anyone with your npub can read; friends'
+parts are encrypted to each friend alone (NIP-44) under a tag only the two of you can work out; a friend request is a
+NIP-59 gift wrap, so relays never see who added whom. This app answers only you (your own Wizard screens and the
+box-local agent).
 
 Stdlib only.
 """
+import base64
 import hashlib
+import hmac
 import json
 import os
 import re
 import secrets
+import socket
+import ssl
+import struct
 import threading
 import time
 import urllib.error
@@ -33,15 +35,15 @@ from urllib.parse import parse_qs, quote, urlsplit
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path(os.environ.get('APP_ROOT', '.')).resolve()
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'profiles'
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 INDEX = os.environ.get('WIZARD_APP_INDEX', 'https://apps.aiwizards.com').rstrip('/')
 SHELL_REPO = os.environ.get('PROFILES_SHELL_REPO', 'humanitylabs-org/wizard-ux')
 SKINS = Path(os.environ.get('SKINS_DIR', '/skins'))   # the owner's Files Skins folder, read-only
 OWNER_LOGINS = {x.strip().lower() for x in os.environ.get('OWNER_LOGINS', '').split(',') if x.strip()}
-# The address friends add: a Serve port that exposes ONLY /profiles/api/friend/* (never the shell or other apps).
-FRIEND_LINK = os.environ.get('FRIEND_LINK', '').strip()
 LEVELS = ('private', 'friends', 'public')
 SECTIONS = ('build', 'skin', 'apps')
+PARTS = ('card',) + SECTIONS
+LEVEL_NAMES = {'private': 'Only you', 'friends': 'Friends', 'public': 'Everyone'}
 NOT_APPS = {'wizard-ux', 'wizard-agent-service', APP_ID}   # the shell and the service are the build; Profiles is the profile
 STATIC_TYPES = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
                 '.svg': 'image/svg+xml'}
@@ -61,9 +63,7 @@ class Problem(Exception):
 
 
 # ---------- Nostr: npub/bech32, BIP-340 sign/verify (stdlib only) ----------
-# Identity is a Nostr key, not an email. This box holds its own Wizard key (spec/WIZARD_ID.md "Your Wizard's own
-# key"): it signs every profile answer and every friend request, and asks friends' boxes for their profile with a
-# NIP-98 signed request. Friends are recognised by their npub; Tailscale is only the private road between boxes.
+# Identity is a Nostr key, not an email: this Wizard's own key (spec/WIZARD_ID.md "Your Wizard's own key").
 
 _CS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
 _P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
@@ -208,21 +208,40 @@ def box_key():
     try:
         sk = bytes.fromhex(json.loads(path.read_text())['secret'])
     except (OSError, ValueError, KeyError):
-        sk = secrets.token_bytes(32)
-        while not 0 < int.from_bytes(sk, 'big') < _N:
-            sk = secrets.token_bytes(32)
+        sk = new_secret()
         DATA.mkdir(parents=True, exist_ok=True)
         tmp = DATA / f'.key.{secrets.token_hex(4)}.tmp'
         tmp.write_text(json.dumps({'secret': sk.hex()}))
         os.chmod(tmp, 0o600)
         os.replace(tmp, path)
-    _KEY = (sk, _mul(_G, int.from_bytes(sk, 'big'))[0].to_bytes(32, 'big').hex())
+    _KEY = (sk, pub_of(sk))
     return _KEY
 
 
-def sign_event(kind, content, tags=()):
-    sk, pk = box_key()
-    ev = {'pubkey': pk, 'created_at': int(time.time()), 'kind': kind, 'tags': [list(t) for t in tags], 'content': content}
+def new_secret():
+    sk = secrets.token_bytes(32)
+    while not 0 < int.from_bytes(sk, 'big') < _N:
+        sk = secrets.token_bytes(32)
+    return sk
+
+
+def pub_of(sk):
+    return _mul(_G, int.from_bytes(sk, 'big'))[0].to_bytes(32, 'big').hex()
+
+
+_last_ts = [0]
+
+
+def sign_event(kind, content, tags=(), sk=None, created_at=None):
+    if created_at is None and 30000 <= kind < 40000:
+        # A replaceable event only replaces an older one: two shares in the same second would leave the relay
+        # keeping either. Each new copy is at least one second newer than the last.
+        created_at = _last_ts[0] = max(int(time.time()), _last_ts[0] + 1)
+    if sk is None:
+        sk, pk = box_key()
+    else:
+        pk = pub_of(sk)
+    ev = {'pubkey': pk, 'created_at': int(created_at or time.time()), 'kind': kind, 'tags': [list(t) for t in tags], 'content': content}
     ev['id'] = event_id(ev)
     ev['sig'] = schnorr_sign(bytes.fromhex(ev['id']), sk).hex()
     return ev
@@ -232,40 +251,266 @@ def box_npub():
     return npub_encode(box_key()[1])
 
 
-_seen_auth = {}
+# NIP-44 v2: what you share with one friend is encrypted to that friend alone (ECDH + HKDF + ChaCha20 + HMAC).
+_M32 = 0xffffffff
 
 
-def nip98_pubkey(headers, method, path_suffix):
-    """Pubkey of a valid NIP-98 `Authorization: Nostr <base64 event>` for this request, or ''."""
-    raw = (headers.get('Authorization') or '').strip()
-    if not raw.lower().startswith('nostr '):
-        return ''
-    try:
-        import base64
-        ev = json.loads(base64.b64decode(raw[6:].strip(), validate=True))
-    except (ValueError, TypeError):
-        return ''
-    if not verify_event(ev) or ev.get('kind') != 27235 or abs(int(ev.get('created_at', 0)) - time.time()) > 60:
-        return ''
-    tags = {t[0]: t[1] for t in ev.get('tags', []) if isinstance(t, list) and len(t) >= 2}
-    if tags.get('method', '').upper() != method or not urlsplit(tags.get('u', '')).path.endswith(path_suffix):
-        return ''
-    fwd = (headers.get('X-Forwarded-Host') or '').lower()
-    if fwd and urlsplit(tags.get('u', '')).netloc.lower() != fwd:
-        return ''
-    now_ = time.time()
-    for k in [k for k, t in _seen_auth.items() if t < now_ - 120]:
-        _seen_auth.pop(k, None)
-    if ev['id'] in _seen_auth:
-        return ''                                  # replayed
-    _seen_auth[ev['id']] = now_
-    return ev['pubkey']
+def _rotl(v, c):
+    return ((v << c) & _M32) | (v >> (32 - c))
 
 
-def nip98_header(url, method):
-    import base64
-    ev = sign_event(27235, '', [('u', url), ('method', method)])
-    return 'Nostr ' + base64.b64encode(json.dumps(ev).encode()).decode()
+def _chacha_block(kw, counter, nw):
+    st = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574, *kw, counter, *nw]
+    x = st[:]
+    for _ in range(10):
+        for a, b, c, d in ((0, 4, 8, 12), (1, 5, 9, 13), (2, 6, 10, 14), (3, 7, 11, 15),
+                           (0, 5, 10, 15), (1, 6, 11, 12), (2, 7, 8, 13), (3, 4, 9, 14)):
+            x[a] = (x[a] + x[b]) & _M32; x[d] = _rotl(x[d] ^ x[a], 16)
+            x[c] = (x[c] + x[d]) & _M32; x[b] = _rotl(x[b] ^ x[c], 12)
+            x[a] = (x[a] + x[b]) & _M32; x[d] = _rotl(x[d] ^ x[a], 8)
+            x[c] = (x[c] + x[d]) & _M32; x[b] = _rotl(x[b] ^ x[c], 7)
+    return struct.pack('<16I', *((x[i] + st[i]) & _M32 for i in range(16)))
+
+
+def chacha20(key, nonce, data):
+    kw, nw = struct.unpack('<8I', key), struct.unpack('<3I', nonce)
+    out = bytearray()
+    for i in range(0, len(data), 64):
+        chunk = data[i:i + 64]
+        ks = _chacha_block(kw, i // 64, nw)[:len(chunk)]
+        out += (int.from_bytes(chunk, 'little') ^ int.from_bytes(ks, 'little')).to_bytes(len(chunk), 'little')
+    return bytes(out)
+
+
+def _hkdf_expand(prk, info, length):
+    out, t, i = b'', b'', 1
+    while len(out) < length:
+        t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
+        out, i = out + t, i + 1
+    return out[:length]
+
+
+_ck_cache = {}
+
+
+def conversation_key(sk, pub_hex):
+    k = (sk, pub_hex)
+    if k not in _ck_cache:
+        pt = _lift_x(int(pub_hex, 16))
+        if pt is None:
+            raise Problem(400, 'Not a valid Nostr ID.')
+        shared = _mul(pt, int.from_bytes(sk, 'big'))[0].to_bytes(32, 'big')
+        _ck_cache[k] = hmac.new(b'nip44-v2', shared, hashlib.sha256).digest()
+    return _ck_cache[k]
+
+
+def _padded_len(n):
+    if n <= 32:
+        return 32
+    nxt = 1 << (n - 1).bit_length()
+    chunk = 32 if nxt <= 256 else nxt // 8
+    return chunk * ((n - 1) // chunk + 1)
+
+
+def nip44_encrypt(ck, text, nonce=None):
+    pt = text.encode()
+    if not 1 <= len(pt) <= 65535:
+        raise Problem(413, 'Too much to share in one message.')
+    nonce = nonce or os.urandom(32)
+    keys = _hkdf_expand(ck, nonce, 76)
+    padded = struct.pack('>H', len(pt)) + pt + bytes(_padded_len(len(pt)) - len(pt))
+    ct = chacha20(keys[:32], keys[32:44], padded)
+    mac = hmac.new(keys[44:], nonce + ct, hashlib.sha256).digest()
+    return base64.b64encode(b'\x02' + nonce + ct + mac).decode()
+
+
+def nip44_decrypt(ck, payload):
+    raw = base64.b64decode(payload, validate=True)
+    if len(raw) < 99 or raw[0] != 2:
+        raise ValueError('unknown encryption version')
+    nonce, ct, mac = raw[1:33], raw[33:-32], raw[-32:]
+    keys = _hkdf_expand(ck, nonce, 76)
+    if not hmac.compare_digest(mac, hmac.new(keys[44:], nonce + ct, hashlib.sha256).digest()):
+        raise ValueError('bad mac')
+    padded = chacha20(keys[:32], keys[32:44], ct)
+    n = struct.unpack('>H', padded[:2])[0]
+    if n == 0 or len(padded) != 2 + _padded_len(n):
+        raise ValueError('bad padding')
+    return padded[2:2 + n].decode()
+
+
+# NIP-59 gift wrap: a friend request reaches someone through public relays without anyone else seeing who sent it.
+HELLO_KIND = 1078
+
+
+def _past():
+    return int(time.time()) - secrets.randbelow(2 * 86400)
+
+
+def gift_wrap(to_pk, content):
+    sk, pk = box_key()
+    rumor = {'pubkey': pk, 'created_at': int(time.time()), 'kind': HELLO_KIND, 'tags': [['t', 'wizard-profile']], 'content': content}
+    rumor['id'] = event_id(rumor)
+    seal = sign_event(13, nip44_encrypt(conversation_key(sk, to_pk), json.dumps(rumor)), (), sk, _past())
+    esk = new_secret()
+    return sign_event(1059, nip44_encrypt(conversation_key(esk, to_pk), json.dumps(seal)), [('p', to_pk)], esk, _past())
+
+
+def unwrap(wrap):
+    sk, _ = box_key()
+    seal = json.loads(nip44_decrypt(conversation_key(sk, wrap['pubkey']), wrap['content']))
+    if not verify_event(seal) or seal.get('kind') != 13:
+        return None
+    rumor = json.loads(nip44_decrypt(conversation_key(sk, seal['pubkey']), seal['content']))
+    if not isinstance(rumor, dict) or rumor.get('pubkey') != seal['pubkey'] or rumor.get('kind') != HELLO_KIND:
+        return None
+    return rumor
+
+
+def pair_tag(friend_pk):
+    """The address of what you share with one friend: only the two of you can work it out, so relays can't map friends."""
+    return 'wp-' + hmac.new(conversation_key(box_key()[0], friend_pk), b'wizard-profile', hashlib.sha256).hexdigest()[:32]
+
+
+def pair_tag_from(friend_pk):
+    return pair_tag(friend_pk)        # symmetric: the conversation key is the same both ways
+
+
+# ---------- relays: a tiny websocket client (stdlib) ----------
+RELAYS = [r.strip() for r in os.environ.get('PROFILES_RELAYS', 'wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net').split(',')
+          if r.strip().startswith('wss://')][:6]
+
+
+class _WS:
+    def __init__(self, url, timeout=8):
+        u = urlsplit(url)
+        raw = socket.create_connection((u.hostname, u.port or 443), timeout=timeout)
+        self.sock = ssl.create_default_context().wrap_socket(raw, server_hostname=u.hostname)
+        key = base64.b64encode(os.urandom(16)).decode()
+        self.sock.sendall((f'GET {u.path or "/"} HTTP/1.1\r\nHost: {u.hostname}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n'
+                           f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nUser-Agent: wizard-profiles/{VERSION}\r\n\r\n').encode())
+        head = b''
+        while b'\r\n\r\n' not in head:
+            c = self.sock.recv(4096)
+            if not c:
+                raise ConnectionError('closed')
+            head += c
+        first, _, self.buf = head.partition(b'\r\n\r\n')
+        if b' 101 ' not in first.split(b'\r\n')[0]:
+            raise ConnectionError('no websocket')
+
+    def _read(self, n):
+        while len(self.buf) < n:
+            c = self.sock.recv(65536)
+            if not c:
+                raise ConnectionError('closed')
+            self.buf += c
+        out, self.buf = self.buf[:n], self.buf[n:]
+        return out
+
+    def _frame(self, op, data):
+        mask, n = os.urandom(4), len(data)
+        hdr = bytes([0x80 | op]) + (bytes([0x80 | n]) if n < 126 else bytes([0xFE]) + struct.pack('>H', n) if n < 65536
+                                    else bytes([0xFF]) + struct.pack('>Q', n))
+        m = (mask * (n // 4 + 1))[:n]
+        self.sock.sendall(hdr + mask + (int.from_bytes(data, 'big') ^ int.from_bytes(m, 'big')).to_bytes(n, 'big') if n else hdr + mask)
+
+    def send(self, obj):
+        self._frame(1, json.dumps(obj, separators=(',', ':')).encode())
+
+    def recv(self):
+        msg = b''
+        while True:
+            b1, b2 = self._read(2)
+            op, n = b1 & 15, b2 & 127
+            if n == 126:
+                n = struct.unpack('>H', self._read(2))[0]
+            elif n == 127:
+                n = struct.unpack('>Q', self._read(8))[0]
+            if n > 4 * 1024 * 1024:
+                raise ConnectionError('frame too large')
+            data = self._read(n)
+            if op == 8:
+                return None
+            if op == 9:
+                self._frame(10, data)
+                continue
+            if op == 10:
+                continue
+            msg += data
+            if b1 & 0x80:
+                return json.loads(msg)
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def _each_relay(fn):
+    out, threads = {}, []
+
+    def run(r):
+        try:
+            out[r] = fn(r)
+        except Exception as e:  # noqa: BLE001 - one relay failing never stops the others
+            out[r] = e
+    for r in RELAYS:
+        t = threading.Thread(target=run, args=(r,), daemon=True)
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join(20)
+    return out
+
+
+def relay_publish(events):
+    """Send events to every relay; returns {event id: number of relays that stored it}."""
+    if not events:
+        return {}
+
+    def one(r):
+        ws, ok = _WS(r), set()
+        try:
+            for ev in events:
+                ws.send(['EVENT', ev])
+            end = time.time() + 10
+            while len(ok) < len(events) and time.time() < end:
+                m = ws.recv()
+                if m is None:
+                    break
+                if m and m[0] == 'OK' and m[2] is True:
+                    ok.add(m[1])
+        finally:
+            ws.close()
+        return ok
+    got = _each_relay(one)
+    return {ev['id']: sum(1 for v in got.values() if isinstance(v, set) and ev['id'] in v) for ev in events}
+
+
+def relay_query(filters):
+    def one(r):
+        ws, sub, evs = _WS(r), secrets.token_hex(6), []
+        try:
+            ws.send(['REQ', sub, *filters])
+            end = time.time() + 10
+            while time.time() < end:
+                m = ws.recv()
+                if m is None or (m[0] in ('EOSE', 'CLOSED') and m[1] == sub):
+                    break
+                if m[0] == 'EVENT' and m[1] == sub and isinstance(m[2], dict):
+                    evs.append(m[2])
+        finally:
+            ws.close()
+        return evs
+    got, seen, out = _each_relay(one), set(), []
+    for v in got.values():
+        for ev in v if isinstance(v, list) else []:
+            if ev.get('id') not in seen and verify_event(ev):
+                seen.add(ev['id'])
+                out.append(ev)
+    return out, sum(1 for v in got.values() if isinstance(v, list))
 
 
 def now():
@@ -285,7 +530,7 @@ def _text(v, name, limit, required=False):
 # ---------- storage: one JSON file, atomic replace ----------
 
 def _blank():
-    return {'name': '', 'bio': '', 'picture': '', 'messenger': '', 'visibility': {s: 'private' for s in SECTIONS}, 'hidden': [], 'uses': [],
+    return {'name': '', 'bio': '', 'picture': '', 'messenger': '', 'visibility': {**{s: 'private' for s in SECTIONS}, 'card': 'friends'}, 'hidden': [], 'uses': [],
             'snapshot': None, 'friends': [], 'requests': [], 'activity': [], 'look_backup': None, 'wearing': None}
 
 
@@ -297,7 +542,12 @@ def load():
     out = _blank()
     if isinstance(s, dict):
         out.update({k: s[k] for k in out if k in s and (type(s[k]) is type(out[k]) or (out[k] is None and isinstance(s[k], dict)))})
-    out['visibility'] = {k: out['visibility'].get(k) if out['visibility'].get(k) in LEVELS else 'private' for k in SECTIONS}
+    vis = out['visibility']
+    out['visibility'] = {k: vis.get(k) if vis.get(k) in LEVELS else 'private' for k in SECTIONS}
+    out['visibility']['card'] = vis.get('card') if vis.get('card') in ('friends', 'public') else 'friends'
+    for k, d in (('sync', None), ('shared_at', None), ('public_live', False), ('unshare', []), ('ignored', []),
+                 ('requests_since', 0), ('requests_checked', None)):
+        out[k] = s.get(k, d) if isinstance(s, dict) else d
     # Friends and requests are Nostr IDs; older email-based entries (before 0.2) are dropped.
     out['friends'] = [f for f in out['friends'] if isinstance(f, dict) and re.fullmatch(r'[0-9a-f]{64}', str(f.get('pubkey', '')))]
     out['requests'] = [r for r in out['requests'] if isinstance(r, dict) and re.fullmatch(r'[0-9a-f]{64}', str(r.get('pubkey', '')))]
@@ -506,25 +756,35 @@ def publish(body):
     snap['apps'] = sorted(apps, key=lambda x: x['name'].lower())
     report['shared'].append({'part': 'apps', 'what': f'{len(apps)} App Store apps'})
 
+    # Called every time you open Profiles: it reads what your Wizard has now. Only a real change is shared again.
+    body_of = lambda x: {k: v for k, v in (x or {}).items() if k not in ('published_at', 'fingerprint')}
     with LOCK:
         s = load()
-        snap['fingerprint'] = hashlib.sha256(json.dumps(snap, sort_keys=True).encode()).hexdigest()[:16]
-        s['snapshot'] = snap
-        log(s, f"Published: {len(apps)} apps, {snap['skin']['name']} look" + (f", build {sha[:8]}" if sha else ', build kept private'))
-        save(s)
-    return {'snapshot': snap, 'report': report, 'me': me()}
+        changed = body_of(s['snapshot']) != body_of(snap)
+        if changed:
+            snap['fingerprint'] = hashlib.sha256(json.dumps(body_of(snap), sort_keys=True).encode()).hexdigest()[:16]
+            s['snapshot'] = snap
+            log(s, f"Your Wizard changed: {len(apps)} apps, {snap['skin']['name']} look" + (f", build {sha[:8]}" if sha else ''))
+            save(s)
+    if changed and (s['friends'] or any(s['visibility'][p] == 'public' for p in SECTIONS)):
+        sync_soon()
+    return {'changed': changed, 'report': report, 'me': me()}
 
 
 
 # ---------- what each viewer may see ----------
+# Levels: 'private' (only you), 'friends' (people you added, each gets their own encrypted copy), 'public' (anyone who
+# has your Nostr ID). Your name and photo ('card') are never private: friends always see who you are.
 
 def view_for(role, s=None):
     s = s or load()
     allowed = {'owner': LEVELS, 'friend': ('friends', 'public'), 'visitor': ('public',)}[role]
     snap = s['snapshot'] or {}
-    out = {'app': APP_ID, 'version': VERSION, 'viewer': role, 'npub': box_npub(), 'name': s['name'] or 'A Wizard owner',
-           'bio': s['bio'], 'picture': s['picture'], 'messenger': s['messenger'] if role != 'visitor' else '',
-           'published_at': snap.get('published_at'), 'fingerprint': snap.get('fingerprint')}
+    card = s['visibility'].get('card', 'friends') in allowed
+    out = {'app': APP_ID, 'version': VERSION, 'viewer': role, 'npub': box_npub(),
+           'name': (s['name'] or 'A Wizard owner') if card else '', 'bio': s['bio'] if card else '',
+           'picture': s['picture'] if card else '', 'messenger': s['messenger'] if card and role != 'visitor' else '',
+           'updated_at': s.get('shared_at') or snap.get('published_at')}
     hidden, uses = set(s['hidden']), set(s['uses'])
     for part in SECTIONS:
         if not snap or s['visibility'][part] not in allowed:
@@ -537,120 +797,153 @@ def view_for(role, s=None):
 
 
 def via_serve(headers):
-    """Tailscale Serve always sets X-Forwarded-Host/For; box-local callers (gateway, agent) do not go through it."""
     host = (headers.get('X-Forwarded-Host') or headers.get('Host') or '').lower().split(':')[0]
     return host.endswith('.ts.net') or bool(headers.get('X-Forwarded-For'))
 
 
-def role_of(headers, method='GET', path=''):
-    """owner = this box (or the owner's own Wizard screens); friend = a request signed by a friend's Nostr ID."""
+def is_owner(headers):
+    """Only you: this box itself (the agent's MCP gateway) or your own Wizard screens. Nobody else reaches this app;
+    friends get what you share through Nostr relays, never by connecting to your Wizard."""
     if not via_serve(headers):
-        return 'owner', ''
+        return True
     login = (headers.get('Tailscale-User-Login') or '').strip().lower()
-    if login and login in OWNER_LOGINS and not headers.get('Authorization'):
-        return 'owner', ''
-    pk = nip98_pubkey(headers, method, path) if path else ''
-    if pk and any(f['pubkey'] == pk for f in load()['friends']):
-        return 'friend', pk
-    return 'visitor', pk
+    return bool(login) and login in OWNER_LOGINS
 
 
-# ---------- friends: Nostr IDs, Tailscale only as the road ----------
+# ---------- sharing over Nostr ----------
+# Public parts: one signed kind 30078 event (d=wizard-profile) anyone with your npub can read.
+# Friends' parts: one kind 30078 event per friend, NIP-44 encrypted to that friend, under a d tag only the two of you
+# can work out, so relays can't see who your friends are. Friend requests: NIP-59 gift wraps (sender hidden).
 
-def clean_address(v):
-    v = _text(v, 'profile link', 300, True)
-    u = urlsplit(v if '://' in v else 'https://' + v)
-    if u.scheme != 'https' or not u.hostname or u.username or u.password or u.query:
-        raise Problem(400, 'Use their friend code, like https://their-box.ts.net:8842/profiles/#npub1…')
-    path = (u.path or '/').rstrip('/') + '/'
-    if not path.endswith('/profiles/'):
-        path = path.rstrip('/') + '/profiles/'
-    return f'https://{u.netloc.lower()}{path}'
+PROFILE_KIND = 30078
+_sync_lock = threading.Lock()
 
 
-def parse_code(body):
-    """A friend code is their link with their Nostr ID after '#'. Link and npub may also come separately."""
-    code = str(body.get('code') or '').strip()
-    address, npub = str(body.get('address') or ''), str(body.get('npub') or '')
-    if code:
-        m = re.search(r'npub1[02-9ac-hj-np-z]{20,}', code.lower())
-        if m:
-            npub = npub or m.group(0)
-        link = code.split('#', 1)[0].strip()
-        if link.lower().startswith(('https://', 'http://')) or '.' in link.split('/')[0]:
-            address = address or link
-    if not npub:
-        raise Problem(400, 'Paste their friend code (it ends with their Nostr ID, npub1…).')
-    if not address:
-        raise Problem(400, 'Their friend code has no link to their Wizard.')
-    return clean_address(address), npub_decode(npub)
+def share_events(s):
+    evs = []
+    pub = view_for('visitor', s)
+    has_public = any(pub[p] for p in SECTIONS) or s['visibility'].get('card') == 'public'
+    if has_public or s.get('public_live'):
+        evs.append(sign_event(PROFILE_KIND, json.dumps(pub, separators=(',', ':')), [('d', 'wizard-profile'), ('t', 'wizard-profile')]))
+    view = json.dumps(view_for('friend', s), separators=(',', ':'))
+    for f in s['friends']:
+        evs.append(sign_event(PROFILE_KIND, nip44_encrypt(conversation_key(box_key()[0], f['pubkey']), view), [('d', pair_tag(f['pubkey']))]))
+    for pk in s.get('unshare', []):            # someone you removed: their copy is replaced by an encrypted "removed"
+        evs.append(sign_event(PROFILE_KIND, nip44_encrypt(conversation_key(box_key()[0], pk), '{"removed":true}'), [('d', pair_tag(pk))]))
+    return evs, has_public
 
 
-def my_code():
-    return f"{FRIEND_LINK}#{box_npub()}" if FRIEND_LINK else box_npub()
+def sync(extra=()):
+    """Push what you share to the relays now. Returns a short report the screen can show."""
+    with _sync_lock:
+        with LOCK:
+            s = load()
+            evs, has_public = share_events(s)
+            sent_unshare = set(s.get('unshare', []))
+        evs = list(extra) + evs
+        if not evs:
+            rep = {'at': now(), 'stored': 0, 'relays': len(RELAYS), 'reached': 0, 'note': 'Nothing is shared yet.'}
+        else:
+            got = relay_publish(evs)
+            best = max(got.values()) if got else 0
+            worst = min(got.values()) if got else 0
+            rep = {'at': now(), 'stored': len(evs), 'relays': len(RELAYS), 'reached': worst, 'best': best}
+        with LOCK:
+            s = load()
+            s['sync'] = rep
+            if rep.get('reached', 0) or not evs:
+                s['shared_at'] = rep['at']
+                s['public_live'] = has_public
+                # Clear only the removals this round actually sent; one made meanwhile goes out next round.
+                s['unshare'] = [x for x in s.get('unshare', []) if x not in sent_unshare]
+            save(s)
+        return rep
 
+
+def sync_soon():
+    threading.Thread(target=lambda: _quiet(sync), daemon=True).start()
+
+
+def _quiet(fn, *a):
+    try:
+        return fn(*a)
+    except Exception:  # noqa: BLE001 - background work reports through state, never crashes the app
+        return None
+
+
+def check_requests():
+    """Gift-wrapped friend requests sent to your Nostr ID since the last look."""
+    with LOCK:
+        since = int(load().get('requests_since') or 0)
+    evs, reached = relay_query([{'kinds': [1059], '#p': [box_key()[1]], 'since': max(0, since - 3 * 86400), 'limit': 200}])
+    found = []
+    for w in evs:
+        r = _quiet(unwrap, w)
+        if not r:
+            continue
+        try:
+            body = json.loads(r['content'])
+        except (ValueError, TypeError):
+            continue
+        found.append((r['pubkey'], body if isinstance(body, dict) else {}, int(r.get('created_at') or 0)))
+    with LOCK:
+        s = load()
+        mine, friends = box_key()[1], {f['pubkey'] for f in s['friends']}
+        known = {r['pubkey'] for r in s['requests']}
+        for pk, body, at in sorted(found, key=lambda x: x[2]):
+            if pk == mine or pk in friends or pk in known or pk in set(s.get('ignored', [])):
+                continue
+            s['requests'] = s['requests'][-19:] + [{'pubkey': pk, 'npub': npub_encode(pk), 'name': str(body.get('name') or '')[:60] or npub_encode(pk)[:12] + '…',
+                                                   'picture': body.get('picture') if valid_picture(body.get('picture')) else '', 'at': now()}]
+            known.add(pk)
+            log(s, f"{s['requests'][-1]['name']} added you as a friend")
+        if reached:
+            s['requests_since'] = int(time.time())
+        s['requests_checked'] = now()
+        save(s)
+    return me()
+
+
+def background():
+    n = 0
+    while True:
+        _quiet(check_requests)
+        if n % 6 == 0:                       # every half hour: keep your shared copies on the relays
+            with LOCK:
+                s = load()
+            if s['friends'] or s.get('public_live'):
+                _quiet(sync)
+        n += 1
+        time.sleep(300)
+
+
+# ---------- friends: just a Nostr ID ----------
 
 def add_friend(body):
     if not isinstance(body, dict):
         raise Problem(400, 'Expected an object.')
-    address, pk = parse_code(body)
+    m = re.search(r'npub1[02-9ac-hj-np-z]{20,}', str(body.get('npub') or body.get('code') or '').lower())
+    if not m:
+        raise Problem(400, 'Paste their Nostr ID. It starts with npub1.')
+    pk = npub_decode(m.group(0))
     if pk == box_key()[1]:
-        raise Problem(400, 'That is you.')
+        raise Problem(400, 'That is your own Nostr ID.')
     with LOCK:
         s = load()
         f = next((f for f in s['friends'] if f['pubkey'] == pk), None)
+        req = next((r for r in s['requests'] if r['pubkey'] == pk), {})
         if not f:
             f = {'id': secrets.token_hex(4), 'pubkey': pk, 'npub': npub_encode(pk), 'added_at': now()}
             s['friends'].append(f)
-        req = next((r for r in s['requests'] if r['pubkey'] == pk), {})
-        f['address'] = address
         f['name'] = _text(body.get('name'), 'name', 60) or req.get('name') or f.get('name') or f['npub'][:12] + '…'
-        if req.get('picture'):
-            f['picture'] = req['picture']
+        f['picture'] = req.get('picture') or f.get('picture', '')
         s['requests'] = [r for r in s['requests'] if r['pubkey'] != pk]
-        log(s, f"Added {f['name']} as a friend")
+        s['unshare'] = [x for x in s.get('unshare', []) if x != pk]
+        log(s, f"Added {f['name']}")
         save(s)
-        hello_body = {'name': s['name'] or 'A Wizard friend', 'address': FRIEND_LINK, 'picture': s['picture']}
-    # Say hello, signed with this Wizard's Nostr ID, so their box can offer to add you back. Nobody can fake it.
-    try:
-        url = address + 'api/friend/hello'
-        signed_post(url, hello_body)
-        hello_state = 'sent'
-    except Problem as p:
-        hello_state = p.message
-    return {'friend': f, 'hello': hello_state, 'me': me()}
-
-
-def signed_post(url, body, timeout=6):
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, method='POST', headers={
-        'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': f'wizard-profiles/{VERSION}',
-        'Authorization': nip98_header(url, 'POST')})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read(65536) or b'{}')
-    except urllib.error.HTTPError as e:
-        raise Problem(e.code if 400 <= e.code < 500 else 502, f'Their Wizard said no ({e.code}).') from None
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        raise Problem(502, f'Could not reach {urlsplit(url).hostname}.') from None
-
-
-def signed_get(url, timeout=8):
-    req = urllib.request.Request(url, headers={'Accept': 'application/json', 'User-Agent': f'wizard-profiles/{VERSION}',
-                                               'Authorization': nip98_header(url, 'GET')})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            raw = r.read(1024 * 1024 + 1)
-    except urllib.error.HTTPError as e:
-        raise Problem(e.code if 400 <= e.code < 500 else 502, f'Their Wizard said no ({e.code}).') from None
-    except (urllib.error.URLError, TimeoutError, OSError):
-        raise Problem(502, f'Could not reach {urlsplit(url).hostname}.') from None
-    if len(raw) > 1024 * 1024:
-        raise Problem(502, 'Answer too large.')
-    try:
-        return json.loads(raw)
-    except ValueError:
-        raise Problem(502, 'Not a profile answer.') from None
+        hello = {'name': s['name'] or 'A Wizard friend', 'picture': s['picture'] if len(s['picture']) < 40000 else ''}
+    rep = sync([gift_wrap(pk, json.dumps(hello))])
+    return {'friend': f, 'sent': rep.get('reached', 0) > 0, 'me': me()}
 
 
 def remove_friend(fid):
@@ -660,32 +953,11 @@ def remove_friend(fid):
         if not gone:
             raise Problem(404, 'No friend with that id.')
         s['friends'] = [f for f in s['friends'] if f['id'] != fid]
+        s['unshare'] = sorted(set(s.get('unshare', [])) | {gone['pubkey']})
         log(s, f"Removed {gone.get('name') or gone['npub']}")
         save(s)
+    sync_soon()
     return me()
-
-
-def hello(pk, body):
-    if not pk:
-        raise Problem(401, 'A friend request must be signed with a Nostr ID.')
-    if pk == box_key()[1]:
-        raise Problem(400, 'That is you.')
-    body = body if isinstance(body, dict) else {}
-    with LOCK:
-        s = load()
-        if any(f['pubkey'] == pk for f in s['friends']):
-            return {'ok': True, 'friend': True}
-        try:
-            address = clean_address(body.get('address')) if body.get('address') else ''
-        except Problem:
-            address = ''
-        name = _text(str(body.get('name') or '')[:60], 'name', 60) or npub_encode(pk)[:12] + '…'
-        pic = body.get('picture') if valid_picture(body.get('picture')) else ''
-        s['requests'] = [r for r in s['requests'] if r['pubkey'] != pk][-19:] + [
-            {'pubkey': pk, 'npub': npub_encode(pk), 'name': name, 'address': address, 'picture': pic, 'at': now()}]
-        log(s, f'{name} asked to be friends')
-        save(s)
-    return {'ok': True, 'friend': False}
 
 
 def dismiss_request(npub):
@@ -693,25 +965,25 @@ def dismiss_request(npub):
     with LOCK:
         s = load()
         s['requests'] = [r for r in s['requests'] if r['pubkey'] != pk]
+        s['ignored'] = sorted(set(s.get('ignored', [])) | {pk})[-200:]
         save(s)
     return me()
 
 
-PICTURE = re.compile(r'^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]{100,140000}$')
+PICTURE = re.compile(r'^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]{100,60000}$')
 
 
 def valid_picture(v):
     return isinstance(v, str) and bool(PICTURE.fullmatch(v))
 
 
-def clean_remote(p, f):
-    """A friend's answer, re-checked here: their box can never make a private app look public or ship unsafe CSS."""
-    out = {'friend': {k: f.get(k) for k in ('id', 'name', 'npub', 'address')}, 'viewer': str(p.get('viewer') or '')[:10],
+def clean_remote(p, f, viewer):
+    """A friend's profile, re-checked here: nobody can make a private app look public or send unsafe CSS."""
+    out = {'friend': {k: f.get(k) for k in ('id', 'name', 'npub')}, 'viewer': viewer,
            'npub': f.get('npub'), 'name': str(p.get('name') or f.get('name') or '')[:60], 'bio': str(p.get('bio') or '')[:400],
            'picture': p.get('picture') if valid_picture(p.get('picture')) else '',
            'messenger': p.get('messenger') if re.fullmatch(r'npub1[02-9ac-hj-np-z]{58}', str(p.get('messenger') or '')) else '',
-           'published_at': str(p.get('published_at') or '')[:20], 'fingerprint': str(p.get('fingerprint') or '')[:16],
-           'build': None, 'skin': None, 'apps': None, 'signed': True}
+           'updated_at': str(p.get('updated_at') or p.get('published_at') or '')[:20], 'build': None, 'skin': None, 'apps': None, 'signed': True}
     b = p.get('build')
     if isinstance(b, dict) and b.get('repo') == SHELL_REPO and FULL_SHA.fullmatch(str(b.get('commit', ''))) \
             and public_commit(SHELL_REPO, b['commit']) == b['commit']:
@@ -736,28 +1008,34 @@ def clean_remote(p, f):
     return out
 
 
-PROFILE_KIND = 30078   # NIP-78 app data, d=wizard-profile: the whole answer is a signed Nostr event
-
-
-def signed_profile(role):
-    v = view_for(role)
-    return sign_event(PROFILE_KIND, json.dumps(v, separators=(',', ':')), [('d', 'wizard-profile'), ('viewer', role)])
-
-
 def friend_profile(fid):
     f = next((f for f in load()['friends'] if f['id'] == fid), None)
     if not f:
         raise Problem(404, 'No friend with that id.')
-    ev = signed_get(f['address'] + 'api/friend/profile')
-    # Only an answer signed by the Nostr ID you added counts; anything else is somebody else talking.
-    if not verify_event(ev) or ev.get('pubkey') != f['pubkey'] or ev.get('kind') != PROFILE_KIND or abs(int(ev.get('created_at', 0)) - time.time()) > 300:
-        raise Problem(502, f"That answer was not signed by {f.get('name') or 'their'} Nostr ID, so it was ignored.")
-    try:
-        p = json.loads(ev['content'])
-    except (ValueError, TypeError):
-        raise Problem(502, 'Their profile could not be read.') from None
-    out = clean_remote(p if isinstance(p, dict) else {}, f)
-    with LOCK:                                         # keep their name and photo fresh in your list
+    tag = pair_tag(f['pubkey'])
+    evs, reached = relay_query([{'kinds': [PROFILE_KIND], 'authors': [f['pubkey']], '#d': [tag, 'wizard-profile'], 'limit': 10}])
+    if not reached:
+        raise Problem(502, 'Could not reach any Nostr relay. Check the internet connection of your Wizard.')
+    latest = {}
+    for ev in evs:                                    # relay_query already checked every signature
+        d = next((t[1] for t in ev.get('tags', []) if len(t) >= 2 and t[0] == 'd'), '')
+        if ev.get('pubkey') == f['pubkey'] and (d not in latest or ev['created_at'] > latest[d]['created_at']):
+            latest[d] = ev
+    p, viewer = None, 'none'
+    if latest.get(tag, {}).get('content'):
+        try:
+            p, viewer = json.loads(nip44_decrypt(conversation_key(box_key()[0], f['pubkey']), latest[tag]['content'])), 'friend'
+        except (ValueError, TypeError):
+            p = None
+        if isinstance(p, dict) and p.get('removed'):   # they removed you: only their public parts remain
+            p, viewer = None, 'none'
+    if p is None and latest.get('wizard-profile'):
+        try:
+            p, viewer = json.loads(latest['wizard-profile']['content']), 'visitor'
+        except (ValueError, TypeError):
+            p = None
+    out = clean_remote(p if isinstance(p, dict) else {}, f, viewer)
+    with LOCK:
         s = load()
         for x in s['friends']:
             if x['id'] == fid:
@@ -770,7 +1048,8 @@ def friend_profile(fid):
 def me():
     s = load()
     return {**{k: s[k] for k in ('name', 'bio', 'picture', 'messenger', 'visibility', 'hidden', 'uses', 'snapshot', 'friends', 'requests', 'wearing')},
-            'npub': box_npub(), 'code': my_code(), 'link': FRIEND_LINK, 'look_saved': bool(s.get('look_backup')),
+            'npub': box_npub(), 'look_saved': bool(s.get('look_backup')), 'sync': s.get('sync'), 'shared_at': s.get('shared_at'),
+            'requests_checked': s.get('requests_checked'), 'relays': RELAYS,
             'activity': list(reversed(s['activity'][-20:])), 'shell_repo': SHELL_REPO}
 
 
@@ -782,6 +1061,7 @@ def update_me(body):
         raise Problem(400, 'Unknown field: ' + ', '.join(sorted(unknown)) + '.')
     with LOCK:
         s = load()
+        before = json.dumps(view_for('friend', s), sort_keys=True) + json.dumps(view_for('visitor', s), sort_keys=True)
         if 'name' in body:
             s['name'] = _text(body['name'], 'name', 60)
         if 'bio' in body:
@@ -797,14 +1077,16 @@ def update_me(body):
             s['messenger'] = m
         if 'visibility' in body:
             v = body['visibility']
-            if not isinstance(v, dict) or not v or any(k not in SECTIONS or v[k] not in LEVELS for k in v):
-                raise Problem(400, 'visibility maps build, skin or apps to private, friends or public.')
+            if not isinstance(v, dict) or not v or any(k not in PARTS or v[k] not in LEVELS for k in v):
+                raise Problem(400, 'visibility maps card, build, skin or apps to private, friends or public.')
             if v.get('build') == 'public':
-                # Trying on a build runs its code on your data, so it is only ever for people you're connected to.
+                # Trying on a build runs its code on your data, so it is only ever for people you added.
                 raise Problem(400, 'A build can be shared with friends, never with everyone.')
+            if v.get('card') == 'private':
+                raise Problem(400, 'Friends always see your name and photo.')
             for k, level in v.items():
-                if s['visibility'][k] != level:
-                    log(s, f"{ {'build': 'Build', 'skin': 'Look', 'apps': 'Apps'}[k] }: {level}")
+                if s['visibility'].get(k) != level:
+                    log(s, f"{ {'card': 'Name and photo', 'build': 'Build', 'skin': 'Look', 'apps': 'Apps'}[k] }: {LEVEL_NAMES[level]}")
                 s['visibility'][k] = level
         for key in ('hidden', 'uses'):
             if key in body:
@@ -812,7 +1094,10 @@ def update_me(body):
                 if not isinstance(v, list) or len(v) > 200 or not all(isinstance(x, str) and APP.fullmatch(x) for x in v):
                     raise Problem(400, f'{key} must be a list of app ids.')
                 s[key] = sorted(set(v))
+        changed = before != json.dumps(view_for('friend', s), sort_keys=True) + json.dumps(view_for('visitor', s), sort_keys=True)
         save(s)
+    if changed:
+        sync_soon()
     return me()
 
 
@@ -881,18 +1166,18 @@ _PORT = os.environ.get('PORT', '8836')
 _LOOPBACK = {f'127.0.0.1:{_PORT}', f'localhost:{_PORT}', f'{APP_ID}:{_PORT}'}
 TRUSTED_HOSTS = _csv('WIZARD_TRUSTED_HOSTS') | _LOOPBACK
 TRUSTED_ORIGINS = _csv('WIZARD_TRUSTED_ORIGINS') | {'http://' + h for h in _LOOPBACK}
-# A friend reaches this box by its own tailnet name, on whichever Serve port; their signed Nostr ID decides what they get.
-FRIEND_PATHS = ('/api/friend/profile', '/api/friend/hello', '/api/friend/id', '/healthz')
 
 
 class Handler(BaseHTTPRequestHandler):
     def refused(self, path, write=False):
         host = (self.headers.get('Host') or '').lower()
-        friend_route = path in FRIEND_PATHS and via_serve(self.headers)
-        if host not in TRUSTED_HOSTS and not friend_route:
+        if host not in TRUSTED_HOSTS:
             self.send(403, {'error': 'Unknown host.'})
             return True
-        if write and not friend_route:
+        if path != '/healthz' and not is_owner(self.headers):
+            self.send(403, {'error': 'Only the owner of this Wizard can open Profiles.'})
+            return True
+        if write:
             origin = (self.headers.get('Origin') or '').lower()
             if origin and origin not in TRUSTED_ORIGINS:
                 self.send(403, {'error': 'Cross-origin writes refused.'})
@@ -909,16 +1194,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(b)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
+        self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' data: https://raw.githubusercontent.com; object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
         self.end_headers()
         if self.command != 'HEAD':
             self.wfile.write(b)
-
-    def owner_only(self):
-        if role_of(self.headers)[0] != 'owner':
-            self.send(403, {'error': 'Only the owner can do that.'})
-            return True
-        return False
 
     def body(self):
         if self.headers.get('Content-Type', '').split(';')[0].strip() != 'application/json':
@@ -936,17 +1215,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == '/healthz':
                 return self.send(200, {'ok': True, 'app': APP_ID, 'version': VERSION})
-            if path == '/api/friend/profile':
-                # The answer is a Nostr event signed by this Wizard's key, so the asker can check who wrote it.
-                return self.send(200, signed_profile(role_of(self.headers, 'GET', '/api/friend/profile')[0]))
-            if path == '/api/friend/id':
-                return self.send(200, {'npub': box_npub(), 'name': load()['name']})
-            if path.startswith('/api/') and self.owner_only():
-                return
             if path == '/api/me':
                 return self.send(200, me())
             if path == '/api/preview':
                 return self.send(200, view_for('friend' if q.get('as', [''])[0] == 'friend' else 'visitor'))
+            if path == '/api/icons':
+                return self.send(200, app_icons(q.get('repo', [])))
             m = re.fullmatch(r'/api/friends/([0-9a-f]{8})/profile', path)
             if m:
                 return self.send(200, friend_profile(m.group(1)))
@@ -969,10 +1243,6 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self.body()
-            if path == '/api/friend/hello':
-                return self.send(200, hello(nip98_pubkey(self.headers, 'POST', '/api/friend/hello'), body))
-            if self.owner_only():
-                return
             if path == '/mcp':
                 out = rpc(body)
                 return self.send(202 if out is None else 200, out)
@@ -980,6 +1250,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, publish(body))
             if path == '/api/friends':
                 return self.send(201, add_friend(body))
+            if path == '/api/sync':
+                sync()
+                return self.send(200, me())
+            if path == '/api/requests/check':
+                return self.send(200, check_requests())
             if path == '/api/look/backup':
                 return self.send(200, save_look_backup(body))
             if path == '/api/look/restore':
@@ -994,7 +1269,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         path = urlsplit(self.path).path
-        if self.refused(path, write=True) or self.owner_only():
+        if self.refused(path, write=True):
             return
         try:
             if path == '/api/me':
@@ -1007,7 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlsplit(self.path).path
-        if self.refused(path, write=True) or self.owner_only():
+        if self.refused(path, write=True):
             return
         try:
             m = re.fullmatch(r'/api/friends/([0-9a-f]{8})', path)
@@ -1021,6 +1296,20 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def app_icons(repos):
+    """App Store icons for the apps on screen (the logo each listing publishes)."""
+    out = {}
+    for r in repos[:200]:
+        if REPO.fullmatch(r):
+            rec = _quiet(store_listing, r)
+            logo = str((rec or {}).get('logo') or '')
+            if logo.startswith('https://raw.githubusercontent.com/'):
+                out[r] = logo
+    return out
+
+
 if __name__ == '__main__':
     DATA.mkdir(parents=True, exist_ok=True)
+    if os.environ.get('PROFILES_OFFLINE') != '1':
+        threading.Thread(target=background, daemon=True).start()
     ThreadingHTTPServer((os.environ.get('BIND', '0.0.0.0'), int(_PORT)), Handler).serve_forever()

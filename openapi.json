@@ -1,38 +1,331 @@
 {
-  "openapi": "3.0.3",
-  "info": {
-    "title": "Wizard Profiles",
-    "version": "0.1.0",
-    "description": "Share your build, look and App Store apps as Private, Friends or Public. Owner routes need the owner's own connection; /api/friend/* answer other Wizards with a signed Nostr event carrying only what their signed Nostr ID may see."
+ "openapi": "3.0.3",
+ "info": {
+  "title": "Wizard Profiles",
+  "version": "0.3.0",
+  "description": "Owner-only API. Share your look, build and App Store apps as Only you, Friends or Everyone through Nostr relays; friends are Nostr IDs."
+ },
+ "paths": {
+  "/healthz": {
+   "get": {
+    "summary": "Health and version",
+    "responses": {
+     "200": {
+      "description": "{ok, app, version}"
+     }
+    }
+   }
   },
-  "paths": {
-    "/healthz": {"get": {"summary": "Health and version", "responses": {"200": {"description": "{ok, app, version}"}}}},
-    "/api/me": {
-      "get": {"summary": "Owner: profile, visibility, snapshot, friends, requests", "responses": {"200": {"description": "Profile"}, "403": {"description": "Not the owner"}}},
-      "put": {"summary": "Owner: change name, bio, visibility {build|skin|apps: private|friends|public}, hidden or uses app ids",
-        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {
-          "name": {"type": "string", "maxLength": 60}, "bio": {"type": "string", "maxLength": 280},
-          "visibility": {"type": "object", "additionalProperties": {"type": "string", "enum": ["private", "friends", "public"]}},
-          "hidden": {"type": "array", "items": {"type": "string"}}, "uses": {"type": "array", "items": {"type": "string"}}}}}}},
-        "responses": {"200": {"description": "Updated profile"}, "400": {"description": "Invalid field"}}}
+  "/api/me": {
+   "get": {
+    "summary": "Owner: profile, visibility, snapshot, friends, requests",
+    "responses": {
+     "200": {
+      "description": "Profile"
+     },
+     "403": {
+      "description": "Not the owner"
+     }
+    }
+   },
+   "put": {
+    "summary": "Owner: change name, bio, visibility {build|skin|apps: private|friends|public}, hidden or uses app ids",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "name": {
+          "type": "string",
+          "maxLength": 60
+         },
+         "bio": {
+          "type": "string",
+          "maxLength": 280
+         },
+         "visibility": {
+          "type": "object",
+          "additionalProperties": {
+           "type": "string",
+           "enum": [
+            "private",
+            "friends",
+            "public"
+           ]
+          }
+         },
+         "hidden": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         },
+         "uses": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        }
+       }
+      }
+     }
     },
-    "/api/publish": {"post": {"summary": "Owner: freeze a snapshot. The build is kept only if it is a public shell commit; apps only if the Wizard App Index lists their repo.",
-      "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["build", "skin"], "properties": {
-        "build": {"type": "object", "properties": {"commit": {"type": "string"}, "name": {"type": "string"}, "base": {"type": "string"}, "changes": {"type": "array"}}},
-        "skin": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "css": {"type": "string"}}},
-        "apps": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "repo": {"type": "string"}}}}}}}}},
-      "responses": {"200": {"description": "{snapshot, report: {shared, kept_private}, me}"}}}},
-    "/api/preview": {"get": {"summary": "Owner: what a friend (as=friend) or everyone (as=public) sees", "parameters": [{"name": "as", "in": "query", "schema": {"type": "string", "enum": ["friend", "public"]}}], "responses": {"200": {"description": "Profile view"}}}},
-    "/api/friends": {"post": {"summary": "Owner: add a friend by friend code (address#npub, or address + npub); sends them a signed hello",
-      "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"code": {"type": "string"}, "address": {"type": "string"}, "npub": {"type": "string"}, "name": {"type": "string"}}}}}},
-      "responses": {"201": {"description": "{friend, hello, me}"}}}},
-    "/api/friends/{id}": {"delete": {"summary": "Owner: remove a friend", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Profile"}}}},
-    "/api/friends/{id}/profile": {"get": {"summary": "Owner: read a friend's profile from their box, re-checked here", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Friend profile"}, "502": {"description": "Their box did not answer"}}}},
-    "/api/requests/dismiss": {"post": {"summary": "Owner: ignore a friend request", "responses": {"200": {"description": "Profile"}}}},
-    "/api/look/backup": {"post": {"summary": "Owner: park your own look before wearing a friend's", "responses": {"200": {"description": "Profile"}}}},
-    "/api/look/restore": {"post": {"summary": "Owner: take back the parked look {skin, css}", "responses": {"200": {"description": "{skin, css, at}"}, "404": {"description": "Nothing parked"}}}},
-    "/api/friend/profile": {"get": {"summary": "Another Wizard: a kind 30078 Nostr event signed by this Wizard, with the parts the caller's NIP-98 signed Nostr ID may see (friend or public)", "responses": {"200": {"description": "Profile view"}}}},
-    "/api/friend/hello": {"post": {"summary": "Another Wizard: ask to be friends; must carry a NIP-98 Authorization signed by their Nostr ID", "responses": {"200": {"description": "{ok, friend}"}}}},
-    "/mcp": {"post": {"summary": "Stateless JSON-RPC MCP: profile_get, profile_preview, profile_set_visibility, friends_list, friend_profile", "responses": {"200": {"description": "JSON-RPC response"}, "202": {"description": "Notification acknowledged"}}}}
+    "responses": {
+     "200": {
+      "description": "Updated profile"
+     },
+     "400": {
+      "description": "Invalid field"
+     }
+    }
+   }
+  },
+  "/api/publish": {
+   "post": {
+    "summary": "Hand the app what this Wizard runs now (build, look, apps); it shares again only if something changed",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "build",
+         "skin"
+        ],
+        "properties": {
+         "build": {
+          "type": "object",
+          "properties": {
+           "commit": {
+            "type": "string"
+           },
+           "name": {
+            "type": "string"
+           },
+           "base": {
+            "type": "string"
+           },
+           "changes": {
+            "type": "array"
+           }
+          }
+         },
+         "skin": {
+          "type": "object",
+          "properties": {
+           "id": {
+            "type": "string"
+           },
+           "name": {
+            "type": "string"
+           },
+           "css": {
+            "type": "string"
+           }
+          }
+         },
+         "apps": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "properties": {
+            "id": {
+             "type": "string"
+            },
+            "repo": {
+             "type": "string"
+            }
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "{snapshot, report: {shared, kept_private}, me}"
+     }
+    }
+   }
+  },
+  "/api/preview": {
+   "get": {
+    "summary": "Owner: what a friend (as=friend) or everyone (as=public) sees",
+    "parameters": [
+     {
+      "name": "as",
+      "in": "query",
+      "schema": {
+       "type": "string",
+       "enum": [
+        "friend",
+        "public"
+       ]
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Profile view"
+     }
+    }
+   }
+  },
+  "/api/friends": {
+   "post": {
+    "summary": "Add a friend by Nostr ID (npub); sends them a sealed friend request through Nostr",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "npub"
+        ],
+        "properties": {
+         "npub": {
+          "type": "string"
+         },
+         "name": {
+          "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "201": {
+      "description": "{friend, sent, me}"
+     }
+    }
+   }
+  },
+  "/api/friends/{id}": {
+   "delete": {
+    "summary": "Owner: remove a friend",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Profile"
+     }
+    }
+   }
+  },
+  "/api/friends/{id}/profile": {
+   "get": {
+    "summary": "Owner: read a friend's profile from their box, re-checked here",
+    "parameters": [
+     {
+      "name": "id",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      }
+     }
+    ],
+    "responses": {
+     "200": {
+      "description": "Friend profile"
+     },
+     "502": {
+      "description": "Their box did not answer"
+     }
+    }
+   }
+  },
+  "/api/requests/dismiss": {
+   "post": {
+    "summary": "Owner: ignore a friend request",
+    "responses": {
+     "200": {
+      "description": "Profile"
+     }
+    }
+   }
+  },
+  "/api/look/backup": {
+   "post": {
+    "summary": "Owner: park your own look before wearing a friend's",
+    "responses": {
+     "200": {
+      "description": "Profile"
+     }
+    }
+   }
+  },
+  "/api/look/restore": {
+   "post": {
+    "summary": "Owner: take back the parked look {skin, css}",
+    "responses": {
+     "200": {
+      "description": "{skin, css, at}"
+     },
+     "404": {
+      "description": "Nothing parked"
+     }
+    }
+   }
+  },
+  "/mcp": {
+   "post": {
+    "summary": "Stateless JSON-RPC MCP: profile_get, profile_preview, profile_set_visibility, friends_list, friend_profile",
+    "responses": {
+     "200": {
+      "description": "JSON-RPC response"
+     },
+     "202": {
+      "description": "Notification acknowledged"
+     }
+    }
+   }
+  },
+  "/api/requests/check": {
+   "post": {
+    "summary": "Look on Nostr for people who added you",
+    "responses": {
+     "200": {
+      "description": "me"
+     }
+    }
+   }
+  },
+  "/api/sync": {
+   "post": {
+    "summary": "Share again now (normally automatic)",
+    "responses": {
+     "200": {
+      "description": "me"
+     }
+    }
+   }
+  },
+  "/api/icons": {
+   "get": {
+    "summary": "App Store icon URLs for repos",
+    "responses": {
+     "200": {
+      "description": "{repo: url}"
+     }
+    }
+   }
   }
+ }
 }

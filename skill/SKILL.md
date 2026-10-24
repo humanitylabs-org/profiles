@@ -12,7 +12,7 @@ metadata:
 ---
 # Profiles
 
-The owner's Wizard profile: his build (his version of the Wizard shell), his look (skin plus his own CSS touches) and his App Store apps. Each part is Private (default), Friends or Public. Identity is a Nostr ID (npub) the app keeps for this Wizard; friends are added by friend code (their address + npub) and everything between Wizards is signed. Tailscale is only the private connection. Trying on a build is friends-only.
+The owner's Wizard profile: his build (his version of the Wizard shell), his look (skin plus his own CSS touches) and his App Store apps. Each part is Private (default), Friends or Public. Identity is a Nostr ID (npub) the app keeps for this Wizard; friends are added by npub alone. Sharing goes through public Nostr relays (public parts signed, friends' parts NIP-44 encrypted per friend, requests NIP-59 gift-wrapped); nobody connects to the owner's Wizard. Changes share automatically, no Publish step. Trying on a build is friends-only.
 
 - `profile_get` reads visibility, the published snapshot, friends and requests. `profile_preview` with `as: friend|public` shows exactly what others see.
 - `profile_set_visibility` changes one part. Only when the owner asked. Sharing is a privacy decision; never widen it on your own.

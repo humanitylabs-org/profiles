@@ -19,11 +19,11 @@ svc['image'] = 'python:3.12-alpine@sha256:1b668429b3511ab407d8e00648891631b0b1a4
 svc['pids_limit'] = 64
 svc['environment'] = {
     'PORT': '8836', 'BIND': '0.0.0.0', 'DATA_DIR': '/data', 'PYTHONDONTWRITEBYTECODE': '1',
-    'OWNER_LOGINS': '${PROFILES_OWNER_LOGINS:-}', 'FRIEND_LINK': '${PROFILES_FRIEND_LINK:-}',
+    'OWNER_LOGINS': '${PROFILES_OWNER_LOGINS:-}',
     'WIZARD_TRUSTED_HOSTS': '${WIZARD_TRUSTED_HOSTS:-}', 'WIZARD_TRUSTED_ORIGINS': '${WIZARD_TRUSTED_ORIGINS:-}',
 }
-# Friends' boxes have *.ts.net names: Tailscale's resolver answers those, a public resolver everything else.
-svc['dns'] = ['100.100.100.100', '1.1.1.1']
+# Nostr relays and the App Index are on the public internet.
+svc['dns'] = ['1.1.1.1', '9.9.9.9']
 # Read-only: lets the app save your My skin exactly (comments too) before you wear a friend's look.
 svc['volumes'] = ['${APP_DATA_DIR}/data:/data', '${ROOT_FOLDER_HOST}/media/Skins:/skins:ro']
 svc['environment']['SKINS_DIR'] = '/skins'

@@ -6,7 +6,7 @@ type: view
 category: app
 version: 0.4.0
 summary: Your Wizard profile with its own Nostr ID. Add friends by ID and share your look, build and App Store apps.
-tags: [social]
+tags: [communication]
 license: GPL-3.0-only
 source: https://github.com/oscarhenrycollins/profiles
 runtime:

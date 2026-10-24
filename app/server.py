@@ -761,7 +761,8 @@ def publish(body):
             continue
         apps.append({'id': a['id'], 'repo': rec['repo'], 'store_id': str(rec.get('id') or a['id'])[:64],
                      'name': str(rec.get('name') or a['id'])[:60], 'summary': str(rec.get('summary') or '')[:200],
-                     'category': str(rec.get('category') or '')[:30], 'type': app_type(rec), 'system': a.get('system') is True})
+                     'category': str(rec.get('category') or '')[:30], 'type': a['type'] if a.get('type') in APP_TYPES else app_type(rec),
+                     'system': a.get('system') is True})
     snap['apps'] = sorted(apps, key=lambda x: x['name'].lower())
     report['shared'].append({'part': 'apps', 'what': f'{len(apps)} App Store apps'})
 
@@ -1012,7 +1013,8 @@ def clean_remote(p, f, viewer):
                 if rec:
                     apps.append({'id': a['id'], 'repo': rec['repo'], 'store_id': str(rec.get('id') or a['id'])[:64],
                                  'name': str(rec.get('name') or a['id'])[:60], 'summary': str(rec.get('summary') or '')[:200],
-                                 'type': app_type(rec), 'system': a.get('system') is True, 'uses': a.get('uses') is True})
+                                 'type': a['type'] if a.get('type') in APP_TYPES else app_type(rec),
+                                 'system': a.get('system') is True, 'uses': a.get('uses') is True})
         out['apps'] = apps
     return out
 

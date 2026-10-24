@@ -48,6 +48,11 @@ function isSystemApp(a) {
   for (const w of [shell(), (() => { try { return top; } catch (_) { return null; } })()]) { try { const K = w?.WosAppKinds; if (K) return !!K.isSystem({ id: a.id, system: a.system }); } catch (_) {} }
   return SYSTEM_IDS.has(a.id);
 }
+const CONNECTOR_IDS = new Set(['wizard-chatgpt', 'wizard-claude', 'wizard-tinfoil', 'wizard-cloudflare', 'wizard-monarch', 'wizard-simplefin', 'wizard-teller']);
+function isConnectorApp(a) {
+  for (const w of [shell(), (() => { try { return top; } catch (_) { return null; } })()]) { try { const K = w?.WosAppKinds; if (K) return !!K.isConnector({ id: a.id }); } catch (_) {} }
+  return CONNECTOR_IDS.has(a.id);
+}
 const SYS_KEY = 'profiles.hideSystem';
 const hideSystem = () => { try { return localStorage.getItem(SYS_KEY) === '1'; } catch (_) { return false; } };
 // Apps grouped by kind; system apps lead each group in purple. `tile(a)` builds one tile.
@@ -93,7 +98,10 @@ async function localFacts() {
   const build = rel?.build ? { commit: rel.build, name: rel.name || 'My Wizard', base: rel.base?.ref || '', changes: rel.changes || [], built_at: rel.built_at || '' }
     : shellApp?.commit ? { commit: shellApp.commit, name: 'Wizard', base: '', changes: [], built_at: '' } : null;
   const sk = currentSkin();
-  return { build, apps: wam.map(a => ({ id: a.id, repo: a.repo, name: a.name || a.id, system: isSystemApp(a) })), skin: { id: sk.id, name: sk.name, css } };
+  // Kind by the app selector's rule: a connector, else an app with a screen, else an agent app.
+  const screen = new Map((Array.isArray(inst?.shell) ? inst.shell : []).map(x => [x.id, !!x.url]));
+  const kindOf = a => isConnectorApp(a) ? 'external' : screen.get(a.id) ? 'view' : 'service';
+  return { build, apps: wam.map(a => ({ id: a.id, repo: a.repo, name: a.name || a.id, system: isSystemApp(a), type: kindOf(a) })), skin: { id: sk.id, name: sk.name, css } };
 }
 const SKIN_NAMES = { nebula: 'Nebula', grove: 'Grove', tide: 'Tide', ember: 'Ember', signal: 'Signal', obsidian: 'Dark', 'obsidian-light': 'Light', landscapes: 'Landscapes' };
 function currentSkin() {

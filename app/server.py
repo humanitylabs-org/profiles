@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path(os.environ.get('APP_ROOT', '.')).resolve()
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'profiles'
-VERSION = '0.4.0'
+VERSION = '0.5.0'
 INDEX = os.environ.get('WIZARD_APP_INDEX', 'https://apps.aiwizards.com').rstrip('/')
 SHELL_REPO = os.environ.get('PROFILES_SHELL_REPO', 'humanitylabs-org/wizard-ux')
 SKINS = Path(os.environ.get('SKINS_DIR', '/skins'))   # the owner's Files Skins folder, read-only
@@ -100,6 +100,28 @@ def _bits(data, f, t, pad):
     elif not pad and (bits >= f or (acc << (t - bits)) & maxv):
         raise ValueError('bad padding')
     return out
+
+
+def b32_encode(hrp, raw):
+    vals = _bits(raw, 8, 5, True)
+    chk = _polymod(_hrp(hrp) + vals + [0] * 6) ^ 1
+    return hrp + '1' + ''.join(_CS[v] for v in vals + [(chk >> 5 * (5 - i)) & 31 for i in range(6)])
+
+
+def b32_decode(hrp_want, text):
+    s = re.sub(r'\s+', '', str(text or '')).lower()
+    if s.startswith('nostr:'):
+        s = s[6:]
+    hrp, _, data = s.rpartition('1')
+    if hrp != hrp_want or not data or any(c not in _CS for c in data):
+        return None
+    vals = [_CS.index(c) for c in data]
+    if len(vals) < 7 or _polymod(_hrp(hrp) + vals) != 1:
+        return None
+    try:
+        return bytes(_bits(vals[:-6], 5, 8, False))
+    except ValueError:
+        return None
 
 
 def npub_encode(hexkey):
@@ -272,14 +294,150 @@ def _chacha_block(kw, counter, nw):
     return struct.pack('<16I', *((x[i] + st[i]) & _M32 for i in range(16)))
 
 
-def chacha20(key, nonce, data):
+def chacha20(key, nonce, data, counter=0):
     kw, nw = struct.unpack('<8I', key), struct.unpack('<3I', nonce)
     out = bytearray()
     for i in range(0, len(data), 64):
         chunk = data[i:i + 64]
-        ks = _chacha_block(kw, i // 64, nw)[:len(chunk)]
+        ks = _chacha_block(kw, counter + i // 64, nw)[:len(chunk)]
         out += (int.from_bytes(chunk, 'little') ^ int.from_bytes(ks, 'little')).to_bytes(len(chunk), 'little')
     return bytes(out)
+
+
+# ---------- identity backup: NIP-49 (ncryptsec), so any Nostr app that reads it can open it ----------
+# scrypt(password) -> key; XChaCha20-Poly1305 seals the 32-byte secret. The password never touches disk.
+
+def _hchacha20(key, nonce16):
+    x = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574, *struct.unpack('<8I', key), *struct.unpack('<4I', nonce16)]
+    for _ in range(10):
+        for a, b, c, d in ((0, 4, 8, 12), (1, 5, 9, 13), (2, 6, 10, 14), (3, 7, 11, 15),
+                           (0, 5, 10, 15), (1, 6, 11, 12), (2, 7, 8, 13), (3, 4, 9, 14)):
+            x[a] = (x[a] + x[b]) & _M32; x[d] = _rotl(x[d] ^ x[a], 16)
+            x[c] = (x[c] + x[d]) & _M32; x[b] = _rotl(x[b] ^ x[c], 12)
+            x[a] = (x[a] + x[b]) & _M32; x[d] = _rotl(x[d] ^ x[a], 8)
+            x[c] = (x[c] + x[d]) & _M32; x[b] = _rotl(x[b] ^ x[c], 7)
+    return struct.pack('<8I', *x[0:4], *x[12:16])
+
+
+def _poly1305(key, msg):
+    r = int.from_bytes(key[:16], 'little') & 0x0ffffffc0ffffffc0ffffffc0fffffff
+    sv, acc, p = int.from_bytes(key[16:], 'little'), 0, (1 << 130) - 5
+    for i in range(0, len(msg), 16):
+        acc = (acc + int.from_bytes(msg[i:i + 16] + b'\x01', 'little')) * r % p
+    return ((acc + sv) & ((1 << 128) - 1)).to_bytes(16, 'little')
+
+
+def _xc_tag(key, nonce12, ad, ct):
+    pad = lambda b: b + b'\x00' * (-len(b) % 16)
+    otk = chacha20(key, nonce12, b'\x00' * 32)
+    return _poly1305(otk, pad(ad) + pad(ct) + struct.pack('<QQ', len(ad), len(ct)))
+
+
+def xchacha_seal(key, nonce24, ad, pt):
+    sub, n12 = _hchacha20(key, nonce24[:16]), b'\x00' * 4 + nonce24[16:]
+    ct = chacha20(sub, n12, pt, 1)
+    return ct + _xc_tag(sub, n12, ad, ct)
+
+
+def xchacha_open(key, nonce24, ad, sealed):
+    sub, n12 = _hchacha20(key, nonce24[:16]), b'\x00' * 4 + nonce24[16:]
+    ct, tag = sealed[:-16], sealed[-16:]
+    if not hmac.compare_digest(_xc_tag(sub, n12, ad, ct), tag):
+        return None
+    return chacha20(sub, n12, ct, 1)
+
+
+_SCRYPT = threading.Lock()   # one at a time: each takes 64 MB and the app has 128 MB
+
+
+def _scrypt(password, salt, log_n):
+    import unicodedata
+    pw = unicodedata.normalize('NFKC', password).encode()
+    with _SCRYPT:
+        return hashlib.scrypt(pw, salt=salt, n=1 << log_n, r=8, p=1, maxmem=(1 << log_n) * 1024 + (16 << 20), dklen=32)
+
+
+BACKUP_LOG_N = 16
+
+
+def _check_password(pw):
+    if not isinstance(pw, str) or not 10 <= len(pw) <= 200:
+        raise Problem(400, 'Use a password of at least 10 characters.')
+    return pw
+
+
+def ncryptsec_encode(sk, password, log_n=BACKUP_LOG_N):
+    salt, nonce = os.urandom(16), os.urandom(24)
+    ad = b'\x00'      # NIP-49: this key has lived unencrypted on a server, so say so honestly
+    sealed = xchacha_seal(_scrypt(password, salt, log_n), nonce, ad, sk)
+    return b32_encode('ncryptsec', bytes([2, log_n]) + salt + nonce + ad + sealed)
+
+
+def ncryptsec_decode(text, password):
+    raw = b32_decode('ncryptsec', text)
+    if raw is None and str(text or '').strip().lower().startswith('nsec1'):
+        raw = b32_decode('nsec', text)
+        if raw is not None and len(raw) == 32:
+            return raw
+    if raw is None or len(raw) != 91 or raw[0] != 2:
+        raise Problem(400, "That isn't a Profiles backup. It should start with ncryptsec1.")
+    log_n, salt, nonce, ad, sealed = raw[1], raw[2:18], raw[18:42], raw[42:43], raw[43:]
+    if not 1 <= log_n <= 16:
+        raise Problem(400, "This backup uses a setting this Wizard can't open.")
+    try:
+        key = _scrypt(password, salt, log_n)
+    except (ValueError, MemoryError):
+        raise Problem(400, "This backup uses a setting this Wizard can't open.")
+    sk = xchacha_open(key, nonce, ad, sealed)
+    if sk is None or len(sk) != 32 or not 0 < int.from_bytes(sk, 'big') < _N:
+        raise Problem(400, "That password doesn't open this backup.")
+    return sk
+
+
+def backup_identity(body):
+    pw = _check_password((body or {}).get('password'))
+    sk, pk = box_key()
+    return {'backup': ncryptsec_encode(sk, pw), 'npub': npub_encode(pk)}
+
+
+def confirm_backup():
+    """The owner ticked "I saved it": only then does the screen call the identity backed up."""
+    with LOCK:
+        s = load()
+        s['backed_up_at'] = now()
+        log(s, 'You backed up your identity')
+        save(s)
+    return me()
+
+
+def restore_identity(body):
+    body = body or {}
+    sk = ncryptsec_decode(body.get('backup'), str(body.get('password') or ''))
+    global _KEY
+    with LOCK:
+        cur_sk, cur_pk = box_key()
+        if sk == cur_sk:
+            return {'changed': False, 'me': me()}
+        stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+        # Keep the ID being replaced, so a restore can always be undone from this Wizard's own files.
+        old = DATA / f'wizard-key.before-{stamp}.json'
+        tmp = DATA / f'.key.{secrets.token_hex(4)}.tmp'
+        tmp.write_text(json.dumps({'secret': cur_sk.hex(), 'npub': npub_encode(cur_pk), 'replaced_at': now()}))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, old)
+        tmp = DATA / f'.key.{secrets.token_hex(4)}.tmp'
+        tmp.write_text(json.dumps({'secret': sk.hex()}))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, DATA / 'wizard-key.json')
+        _KEY = None
+        _ck_cache.clear()
+        s = load()
+        s.update({'requests': [], 'requests_since': 0, 'shared_at': None, 'sync': None, 'backed_up_at': now(), 'public_live': True})
+        log(s, 'You restored your identity from a backup')
+        save(s)
+    sync_soon()
+    threading.Thread(target=lambda: _quiet(check_requests), daemon=True).start()
+    return {'changed': True, 'me': me()}
 
 
 def _hkdf_expand(prk, info, length):
@@ -546,7 +704,7 @@ def load():
     out['visibility'] = {k: vis.get(k) if vis.get(k) in LEVELS else 'private' for k in SECTIONS}
     out['visibility']['card'] = vis.get('card') if vis.get('card') in ('friends', 'public') else 'friends'
     for k, d in (('sync', None), ('shared_at', None), ('public_live', False), ('unshare', []), ('ignored', []),
-                 ('requests_since', 0), ('requests_checked', None)):
+                 ('requests_since', 0), ('requests_checked', None), ('backed_up_at', None)):
         out[k] = s.get(k, d) if isinstance(s, dict) else d
     # Friends and requests are Nostr IDs; older email-based entries (before 0.2) are dropped.
     out['friends'] = [f for f in out['friends'] if isinstance(f, dict) and re.fullmatch(r'[0-9a-f]{64}', str(f.get('pubkey', '')))]
@@ -1062,7 +1220,7 @@ def me():
     s = load()
     return {**{k: s[k] for k in ('name', 'bio', 'picture', 'messenger', 'visibility', 'hidden', 'uses', 'snapshot', 'friends', 'requests', 'wearing')},
             'npub': box_npub(), 'look_saved': bool(s.get('look_backup')), 'sync': s.get('sync'), 'shared_at': s.get('shared_at'),
-            'requests_checked': s.get('requests_checked'), 'relays': RELAYS,
+            'requests_checked': s.get('requests_checked'), 'relays': RELAYS, 'backed_up_at': s.get('backed_up_at'),
             'activity': list(reversed(s['activity'][-20:])), 'shell_repo': SHELL_REPO}
 
 
@@ -1272,6 +1430,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, save_look_backup(body))
             if path == '/api/look/restore':
                 return self.send(200, take_look_backup())
+            if path == '/api/identity/backup':
+                return self.send(200, backup_identity(body))
+            if path == '/api/identity/confirm':
+                return self.send(200, confirm_backup())
+            if path == '/api/identity/restore':
+                return self.send(200, restore_identity(body))
             if path == '/api/requests/dismiss':
                 return self.send(200, dismiss_request(str((body or {}).get('npub') or '')))
             self.send(404, {'error': 'Not found.'})

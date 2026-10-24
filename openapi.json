@@ -2,7 +2,7 @@
  "openapi": "3.0.3",
  "info": {
   "title": "Wizard Profiles",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "description": "Owner-only API. Share your look, build and App Store apps as Only you, Friends or Everyone through Nostr relays; friends are Nostr IDs."
  },
  "paths": {
@@ -323,6 +323,95 @@
     "responses": {
      "200": {
       "description": "{repo: url}"
+     }
+    }
+   }
+  },
+  "/api/identity/backup": {
+   "post": {
+    "summary": "Make a password-locked backup of this Wizard's Nostr key (NIP-49 ncryptsec). The password is never stored.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "password": {
+          "type": "string",
+          "minLength": 10
+         }
+        },
+        "required": [
+         "password"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK"
+     },
+     "400": {
+      "description": "Refused, with a plain-English reason"
+     }
+    }
+   }
+  },
+  "/api/identity/confirm": {
+   "post": {
+    "summary": "Record that the owner saved the backup.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK"
+     },
+     "400": {
+      "description": "Refused, with a plain-English reason"
+     }
+    }
+   }
+  },
+  "/api/identity/restore": {
+   "post": {
+    "summary": "Switch this Wizard to the Nostr ID in a backup. The replaced key is kept on the box.",
+    "requestBody": {
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "properties": {
+         "backup": {
+          "type": "string"
+         },
+         "password": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "backup",
+         "password"
+        ]
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "OK"
+     },
+     "400": {
+      "description": "Refused, with a plain-English reason"
      }
     }
    }

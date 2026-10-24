@@ -17,6 +17,7 @@ The owner's Wizard profile: his build (his version of the Wizard shell), his loo
 - `profile_get` reads visibility, the published snapshot, friends and requests. `profile_preview` with `as: friend|public` shows exactly what others see.
 - `profile_set_visibility` changes one part. Only when the owner asked. Sharing is a privacy decision; never widen it on your own.
 - `friends_list` and `friend_profile` (friend id) read friends and what a friend shares.
+- Backing up or restoring the Nostr identity happens only in the Profiles screen (Back up your identity, under the Nostr ID). Never ask for, read, print or move the key or the backup password yourself; point the owner there.
 - Adding friends, choosing who sees what, wearing a look and trying on a build happen in the Profiles screen. Point the owner there instead of doing it for him. There is no Publish step: the screen shares changes by itself.
 
 Rules the app enforces (don't work around them): an app is shared only if the Wizard App Index lists its public repo, so local and private apps never show; a build is shared only if its exact commit is public shell code and never with everyone; a friend's profile is checked on this box (signature, App Index, CSS) before it is shown.

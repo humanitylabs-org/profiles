@@ -276,7 +276,107 @@ function renderMe() {
 }
 function idCard() {
   const cp = h('button', { type: 'button', class: 'pf-chip on', onclick: e => copy(e.currentTarget, ME.npub, 'Copy') }, 'Copy');
-  return h('div', { class: 'pf-id' }, h('div', { class: 'wz-main' }, h('small', { text: 'Your Nostr ID' }), h('code', { class: 'pf-npub', title: ME.npub, text: shortNpub(ME.npub) })), cp);
+  const safe = !!ME.backed_up_at;
+  return h('div', { class: 'pf-id-wrap' },
+    h('div', { class: 'pf-id' }, h('div', { class: 'wz-main' }, h('small', { text: 'Your Nostr ID' }), h('code', { class: 'pf-npub', title: ME.npub, text: shortNpub(ME.npub) })), cp),
+    h('button', { type: 'button', class: 'pf-safe' + (safe ? ' ok' : ''), onclick: () => identitySheet() },
+      h('span', { class: 'pf-safe-ic', 'aria-hidden': 'true', html: safe ? ICON.shieldOk : ICON.shield }),
+      h('span', { class: 'wz-main' }, h('b', { text: safe ? 'Identity backed up' : 'Back up your identity' }),
+        h('small', { text: safe ? `Backed up ${ago(ME.backed_up_at)}` : 'Not backed up yet. Tap to save your key.' })),
+      h('span', { class: 'pf-go', 'aria-hidden': 'true', text: '›' })));
+}
+const ICON = {
+  shield: '<svg viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.4-3 8.1-7 9.5-4-1.4-7-5.1-7-9.5V6z"/><path d="M12 8v4.5M12 15.6v.1"/></svg>',
+  shieldOk: '<svg viewBox="0 0 24 24"><path d="M12 3l7 3v5.5c0 4.4-3 8.1-7 9.5-4-1.4-7-5.1-7-9.5V6z"/><path d="M8.6 12.2l2.3 2.3 4.6-4.7"/></svg>',
+  key: '<svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2.5 2.5M14 9l2 2"/></svg>',
+};
+/* ---------- identity backup: a password-locked copy of your Nostr key (NIP-49, opens in other Nostr apps too) ---------- */
+function sheet(label, ...kids) {
+  const close = () => { el.remove(); document.removeEventListener('keydown', esc); };
+  const esc = e => { if (e.key === 'Escape') close(); };
+  const el = h('div', { class: 'pf-crop pf-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': label, onclick: e => { if (e.target === el) close(); } },
+    h('div', { class: 'pf-crop-card pf-sheet-card' }, h('span', { class: 'pf-grabber', 'aria-hidden': 'true' }),
+      h('button', { type: 'button', class: 'pf-x', 'aria-label': 'Close', onclick: () => close(), html: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>' }), ...kids));
+  document.addEventListener('keydown', esc);
+  document.body.append(el);
+  return { el, close, card: el.firstChild };
+}
+function pwField(placeholder, auto) {
+  const i = h('input', { class: 'wz-input', type: 'password', placeholder, autocomplete: auto, minlength: 10, maxlength: 200, 'aria-label': placeholder });
+  const eye = h('button', { type: 'button', class: 'pf-eye', 'aria-label': 'Show password', onclick: () => { const s = i.type === 'password'; i.type = s ? 'text' : 'password'; eye.textContent = s ? 'Hide' : 'Show'; } }, 'Show');
+  return { input: i, el: h('div', { class: 'pf-pw' }, i, eye) };
+}
+function identitySheet() {
+  const sh = sheet('Back up your identity');
+  const err = h('p', { class: 'pf-err', role: 'alert' });
+  const pw = pwField('Choose a password', 'new-password'), pw2 = pwField('Type it again', 'new-password');
+  const go = h('button', { type: 'submit', class: 'pf-btn go wide' }, 'Make my backup');
+  const form = h('form', { class: 'pf-sheet-form', novalidate: true, onsubmit: async e => {
+    e.preventDefault(); err.textContent = '';
+    if (pw.input.value.length < 10) { err.textContent = 'Use at least 10 characters.'; return pw.input.focus(); }
+    if (pw.input.value !== pw2.input.value) { err.textContent = "Those passwords don't match."; return pw2.input.focus(); }
+    go.disabled = true; go.textContent = 'Locking…';
+    try { const r = await api('api/identity/backup', 'POST', { password: pw.input.value }); pw.input.value = pw2.input.value = ''; savedStep(sh, r.backup, r.npub); }
+    catch (x) { err.textContent = x.message; go.disabled = false; go.textContent = 'Make my backup'; }
+  } }, pw.el, pw2.el, err,
+    h('p', { class: 'pf-warn soft', text: "Nobody can reset this password, not even your Wizard. Keep it with the backup in your password manager." }), go);
+  sh.card.append(
+    h('span', { class: 'pf-sheet-ic', 'aria-hidden': 'true', html: ICON.key }),
+    h('b', { text: 'Back up your identity' }),
+    h('p', { class: 'pf-sheet-p', text: 'Your Nostr ID is how friends know you. This makes a copy of its secret key, locked with a password only you know, so you can bring the same ID to a new Wizard.' }),
+    form,
+    h('p', { class: 'pf-sheet-fine' }, 'Already have a backup? ', h('button', { type: 'button', class: 'pf-link-btn inline', onclick: () => { sh.close(); restoreSheet(); } }, 'Restore it')));
+  pw.input.focus();
+}
+function savedStep(sh, code, npub) {
+  const file = () => {
+    const text = `Wizard Profiles identity backup\nNostr ID: ${npub}\nMade: ${new Date().toISOString().slice(0, 10)}\n\nLocked with your password (NIP-49). To restore: Profiles > Back up your identity > Restore.\n\n${code}\n`;
+    const a = h('a', { href: 'data:text/plain;charset=utf-8,' + encodeURIComponent(text), download: `wizard-identity-${npub.slice(5, 13)}.txt` });
+    document.body.append(a); a.click(); a.remove();
+  };
+  const done = h('button', { type: 'button', class: 'pf-btn go wide', disabled: true, onclick: async () => {
+    try { ME = await api('api/identity/confirm', 'POST', {}); render(); sh.close(); say('Identity backed up.', 'note'); } catch (x) { say(x.message, 'error'); }
+  } }, 'Done');
+  const tick = h('input', { type: 'checkbox', onchange: () => { done.disabled = !tick.checked; } });
+  sh.card.replaceChildren(sh.card.querySelector('.pf-x'),
+    h('span', { class: 'pf-sheet-ic ok', 'aria-hidden': 'true', html: ICON.shieldOk }),
+    h('b', { text: 'Your backup is ready' }),
+    h('p', { class: 'pf-sheet-p', text: "Save it in your password manager, or anywhere off this server. You'll need your password to restore it." }),
+    h('code', { class: 'pf-backup', text: code }),
+    h('div', { class: 'pf-pair' },
+      h('button', { type: 'button', class: 'pf-btn', onclick: e => copy(e.currentTarget, code, 'Copy') }, 'Copy'),
+      h('button', { type: 'button', class: 'pf-btn', onclick: e => { file(); e.currentTarget.textContent = 'Saved'; } }, 'Save as file')),
+    h('label', { class: 'pf-tick' }, tick, h('span', { text: 'I saved it, and I know the password' })),
+    done);
+}
+function restoreSheet() {
+  const sh = sheet('Restore your identity');
+  const err = h('p', { class: 'pf-err', role: 'alert' });
+  const code = h('textarea', { class: 'wz-input pf-code pf-paste', rows: 3, placeholder: 'Paste your backup (ncryptsec1…)', 'aria-label': 'Your backup', autocomplete: 'off', spellcheck: 'false' });
+  const pick = h('input', { type: 'file', accept: '.txt,text/plain', class: 'pf-file', onchange: async () => {
+    const f = pick.files?.[0]; if (!f) return; const t = await f.text(); const m = t.match(/ncryptsec1[0-9a-z]+/i); code.value = m ? m[0] : ''; if (!m) err.textContent = "That file doesn't hold a backup."; pick.value = '';
+  } });
+  const pw = pwField('Backup password', 'current-password');
+  const go = h('button', { type: 'submit', class: 'pf-btn go wide' }, 'Restore');
+  let armed = false;
+  const form = h('form', { class: 'pf-sheet-form', novalidate: true, onsubmit: async e => {
+    e.preventDefault(); err.textContent = '';
+    if (!code.value.trim()) { err.textContent = 'Paste your backup or pick the file first.'; return code.focus(); }
+    if (!armed) { armed = true; go.textContent = 'Yes, switch to that ID'; go.classList.add('warn'); warn.hidden = false; return; }
+    go.disabled = true; go.textContent = 'Unlocking…';
+    try {
+      const r = await api('api/identity/restore', 'POST', { backup: code.value, password: pw.input.value }); pw.input.value = '';
+      ME = r.me; render(); sh.close(); say(r.changed ? 'Restored. This Wizard now uses that Nostr ID.' : 'That backup is already this ID. Nothing changed.', 'note');
+    } catch (x) { err.textContent = x.message; go.disabled = false; go.textContent = 'Yes, switch to that ID'; }
+  } }, code, h('button', { type: 'button', class: 'pf-link-btn left', onclick: () => pick.click() }, 'Or pick the backup file'), pick, pw.el, err);
+  const warn = h('p', { class: 'pf-warn', hidden: true, text: `This Wizard's current ID (${shortNpub(ME.npub)}) stops being used here. Friends who added it would need to add the restored one. The current key is kept on this Wizard in case you change your mind.` });
+  form.append(warn, go);
+  sh.card.append(
+    h('span', { class: 'pf-sheet-ic', 'aria-hidden': 'true', html: ICON.key }),
+    h('b', { text: 'Restore your identity' }),
+    h('p', { class: 'pf-sheet-p', text: 'Bring back a Nostr ID you backed up, for example on a new Wizard.' }),
+    form);
+  code.focus();
 }
 async function toggleHidden(id) {
   const set = new Set(ME.hidden); set.has(id) ? set.delete(id) : set.add(id);

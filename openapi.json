@@ -3,7 +3,7 @@
   "info": {
     "title": "Wizard Profiles",
     "version": "0.1.0",
-    "description": "Share your build, look and App Store apps as Private, Friends or Public. Owner routes need the owner's own connection; /api/friend/* answer friends over Tailscale with only what they may see."
+    "description": "Share your build, look and App Store apps as Private, Friends or Public. Owner routes need the owner's own connection; /api/friend/* answer other Wizards with a signed Nostr event carrying only what their signed Nostr ID may see."
   },
   "paths": {
     "/healthz": {"get": {"summary": "Health and version", "responses": {"200": {"description": "{ok, app, version}"}}}},
@@ -23,16 +23,16 @@
         "apps": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "repo": {"type": "string"}}}}}}}}},
       "responses": {"200": {"description": "{snapshot, report: {shared, kept_private}, me}"}}}},
     "/api/preview": {"get": {"summary": "Owner: what a friend (as=friend) or everyone (as=public) sees", "parameters": [{"name": "as", "in": "query", "schema": {"type": "string", "enum": ["friend", "public"]}}], "responses": {"200": {"description": "Profile view"}}}},
-    "/api/friends": {"post": {"summary": "Owner: add a friend by their Profiles link and Tailscale login; sends them a hello",
-      "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["address", "login"], "properties": {"address": {"type": "string"}, "login": {"type": "string"}, "name": {"type": "string"}}}}}},
+    "/api/friends": {"post": {"summary": "Owner: add a friend by friend code (address#npub, or address + npub); sends them a signed hello",
+      "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"code": {"type": "string"}, "address": {"type": "string"}, "npub": {"type": "string"}, "name": {"type": "string"}}}}}},
       "responses": {"201": {"description": "{friend, hello, me}"}}}},
     "/api/friends/{id}": {"delete": {"summary": "Owner: remove a friend", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Profile"}}}},
     "/api/friends/{id}/profile": {"get": {"summary": "Owner: read a friend's profile from their box, re-checked here", "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}], "responses": {"200": {"description": "Friend profile"}, "502": {"description": "Their box did not answer"}}}},
     "/api/requests/dismiss": {"post": {"summary": "Owner: ignore a friend request", "responses": {"200": {"description": "Profile"}}}},
     "/api/look/backup": {"post": {"summary": "Owner: park your own look before wearing a friend's", "responses": {"200": {"description": "Profile"}}}},
     "/api/look/restore": {"post": {"summary": "Owner: take back the parked look {skin, css}", "responses": {"200": {"description": "{skin, css, at}"}, "404": {"description": "Nothing parked"}}}},
-    "/api/friend/profile": {"get": {"summary": "Anyone over Tailscale: the snapshot parts their login may see (friend or public)", "responses": {"200": {"description": "Profile view"}}}},
-    "/api/friend/hello": {"post": {"summary": "Another person over Tailscale: ask to be friends (their login comes from Tailscale, not the body)", "responses": {"200": {"description": "{ok, friend}"}}}},
+    "/api/friend/profile": {"get": {"summary": "Another Wizard: a kind 30078 Nostr event signed by this Wizard, with the parts the caller's NIP-98 signed Nostr ID may see (friend or public)", "responses": {"200": {"description": "Profile view"}}}},
+    "/api/friend/hello": {"post": {"summary": "Another Wizard: ask to be friends; must carry a NIP-98 Authorization signed by their Nostr ID", "responses": {"200": {"description": "{ok, friend}"}}}},
     "/mcp": {"post": {"summary": "Stateless JSON-RPC MCP: profile_get, profile_preview, profile_set_visibility, friends_list, friend_profile", "responses": {"200": {"description": "JSON-RPC response"}, "202": {"description": "Notification acknowledged"}}}}
   }
 }

@@ -14,6 +14,13 @@
 .pf-avatar { flex: none; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; font-size: 22px; font-weight: 800;
   color: var(--on-accent); background: var(--accent); }
 .pf-avatar.sm { width: 36px; height: 36px; font-size: 15px; }
+.pf-avatar.lg { width: 72px; height: 72px; font-size: 30px; }
+img.pf-avatar { object-fit: cover; background: var(--fill); }
+.pf-photo-row { display: flex; align-items: center; gap: 10px; padding-bottom: 4px; }
+.pf-npub { align-self: flex-start; margin-top: 3px; padding: 2px 8px; border-radius: 99px; font: 600 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--ink-2); background: var(--fill); }
+button.pf-npub:active { background: var(--fill-2); }
+.pf-code { min-height: 64px; padding: 10px 16px; border-radius: 16px; resize: vertical; font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
 
 .pf-part { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 12px; padding: 10px 8px 12px; }
 .pf-part + .pf-part { border-top: 1px solid var(--line); }

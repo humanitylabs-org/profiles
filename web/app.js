@@ -43,10 +43,47 @@ async function localFacts() {
   const shellApp = wam.find(a => a.id === 'wizard-ux');
   const build = rel?.build ? { commit: rel.build, name: rel.name || 'My Wizard', base: rel.base?.ref || '', changes: rel.changes || [], built_at: rel.built_at || '' }
     : shellApp?.commit ? { commit: shellApp.commit, name: 'Wizard', base: '', changes: [], built_at: '' } : null;
-  const S = shell()?.WosSkin;
-  const skinId = S?.current || (() => { try { return localStorage.getItem('wos.skin') || 'nebula'; } catch (_) { return 'nebula'; } })();
-  const skinName = S?.list?.find(s => s.id === skinId)?.name || skinId;
+  const { id: skinId, name: skinName } = currentSkin();
   return { build, apps: wam.map(a => ({ id: a.id, repo: a.repo, name: a.name || a.id })), skin: { id: skinId, name: skinName, css } };
+}
+
+const SKIN_NAMES = { nebula: 'Nebula', grove: 'Grove', tide: 'Tide', ember: 'Ember', signal: 'Signal', obsidian: 'Dark', 'obsidian-light': 'Light', landscapes: 'Landscapes' };
+function currentSkin() {
+  // The skin Wizard is wearing right now: the shell's own picker first (parent or top window), then the skin the
+  // shell pushed into this frame, then this device's saved choice. Never a guess.
+  let S = null;
+  for (const w of [shell(), (() => { try { return top !== window ? top : null; } catch (_) { return null; } })()]) { try { if (w?.WosSkin) { S = w.WosSkin; break; } } catch (_) {} }
+  let id = S?.current || '';
+  if (!id && window.WizardTheme?.connected) id = window.WizardTheme.current?.skin || '';
+  if (!id) { try { id = localStorage.getItem('wos.skin') || ''; } catch (_) {} }
+  id = id || 'nebula';
+  return { id, name: S?.list?.find(x => x.id === id)?.name || SKIN_NAMES[id] || id };
+}
+function avatar(p, cls = '') {
+  return p?.picture ? h('img', { class: 'pf-avatar ' + cls, src: p.picture, alt: '' })
+    : h('div', { class: 'pf-avatar ' + cls, 'aria-hidden': 'true', text: (p?.name || '?').trim().charAt(0).toUpperCase() || '?' });
+}
+const shortNpub = n => n ? n.slice(0, 12) + '…' + n.slice(-6) : '';
+async function copy(btn, text, label = 'Copy') {
+  try { await navigator.clipboard.writeText(text); btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = label; }, 1600); }
+  catch (_) { say('Copy failed. Long-press the text instead.', 'error'); }
+}
+// A photo becomes a small square JPEG on this device (about 30 KB) before it is saved; the original never leaves.
+function squarePhoto(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const side = Math.min(img.naturalWidth, img.naturalHeight), c = document.createElement('canvas');
+      c.width = c.height = 256;
+      c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 256, 256);
+      URL.revokeObjectURL(url);
+      let q = .85, out = c.toDataURL('image/jpeg', q);
+      while (out.length > 100000 && q > .4) { q -= .15; out = c.toDataURL('image/jpeg', q); }
+      resolve(out);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('That file is not a photo this device can read.')); };
+    img.src = url;
+  });
 }
 
 /* ---------- You ---------- */
@@ -77,10 +114,26 @@ async function toggleApp(key, id) {
   try { ME = await api('api/me', 'PUT', { [key]: [...set] }); render(); } catch (e) { say(e.message, 'error'); }
 }
 function editName() {
-  const box = h('form', { class: 'pf-edit', onsubmit: async e => { e.preventDefault(); try { ME = await api('api/me', 'PUT', { name: n.value, bio: b.value }); render(); } catch (err) { say(err.message, 'error'); } } });
-  const n = h('input', { class: 'wz-input', maxlength: 60, placeholder: 'Your name', 'aria-label': 'Your name' }); n.value = ME.name;
+  let picture = ME.picture || '';
+  const box = h('form', { class: 'pf-edit', onsubmit: async e => {
+    e.preventDefault();
+    try { ME = await api('api/me', 'PUT', { name: n.value, bio: b.value, picture, messenger: m.value.trim() }); render(); say('Saved.'); }
+    catch (err) { say(err.message, 'error'); }
+  } });
+  const face = h('div', { class: 'pf-photo' });
+  const paint = () => face.replaceChildren(avatar({ name: n.value || ME.name, picture }, 'lg'));
+  const file = h('input', { type: 'file', accept: 'image/*', hidden: true, onchange: async () => {
+    const f0 = file.files?.[0]; if (!f0) return;
+    try { picture = await squarePhoto(f0); paint(); remove.hidden = false; } catch (err) { say(err.message, 'error'); }
+  } });
+  const remove = h('button', { type: 'button', class: 'pf-chip', hidden: !picture, onclick: () => { picture = ''; paint(); remove.hidden = true; } }, 'Remove');
+  const n = h('input', { class: 'wz-input', maxlength: 60, placeholder: 'Your name', 'aria-label': 'Your name', oninput: () => { if (!picture) paint(); } }); n.value = ME.name;
   const b = h('input', { class: 'wz-input', maxlength: 280, placeholder: 'A line about you (optional)', 'aria-label': 'About you' }); b.value = ME.bio;
-  box.append(n, b, h('div', { class: 'pf-row-acts' }, h('button', { type: 'submit', class: 'pf-btn go' }, 'Save'), h('button', { type: 'button', class: 'pf-btn', onclick: render }, 'Cancel')));
+  const m = h('input', { class: 'wz-input', placeholder: 'Your Messenger address, npub1… (optional)', 'aria-label': 'Messenger address', autocomplete: 'off', spellcheck: 'false' }); m.value = ME.messenger || '';
+  paint();
+  box.append(h('div', { class: 'pf-photo-row' }, face, h('button', { type: 'button', class: 'pf-chip on', onclick: () => file.click() }, picture ? 'Change photo' : 'Add photo'), remove, file),
+    n, b, m, h('p', { class: 'pf-hint', text: 'Friends see your Messenger address so they can message you there.' }),
+    h('div', { class: 'pf-row-acts' }, h('button', { type: 'submit', class: 'pf-btn go' }, 'Save'), h('button', { type: 'button', class: 'pf-btn', onclick: render }, 'Cancel')));
   $('view-me').querySelector('.pf-who').replaceWith(box); n.focus();
 }
 function partBody(part, snap) {
@@ -90,15 +143,20 @@ function partBody(part, snap) {
     if (!b) return h('small', {}, 'This build is not public code yet, so it stays private.');
     return h('small', {}, `${b.name} · ${b.changes.length} change${b.changes.length === 1 ? '' : 's'} of your own`);
   }
-  if (part === 'skin') return h('small', {}, snap ? snap.skin.name + (snap.skin.css ? ' with your own touches' : '') : 'Publish to share it.');
+  if (part === 'skin') {
+    const live = currentSkin();
+    if (!snap) return h('small', {}, `${live.name} · publish to share it`);
+    return h('small', {}, snap.skin.id === live.id ? live.name + (snap.skin.css ? ' with your own touches' : '') : `Shared: ${snap.skin.name}. You wear ${live.name} now, publish again to share it.`);
+  }
   return h('small', {}, snap ? `${snap.apps.length - ME.hidden.filter(id => snap.apps.some(a => a.id === id)).length} of ${snap.apps.length} App Store apps shown` : 'Publish to share them.');
 }
 function renderMe() {
   const v = $('view-me'); v.replaceChildren();
   const snap = ME.snapshot;
   v.append(h('div', { class: 'pf-who' },
-    h('div', { class: 'pf-avatar', 'aria-hidden': 'true', text: (ME.name || '?').trim().charAt(0).toUpperCase() || '?' }),
-    h('div', { class: 'wz-main' }, h('b', { text: ME.name || 'Add your name' }), h('small', { text: ME.bio || (ME.you ? ME.you : 'Friends see this name') })),
+    avatar(ME),
+    h('div', { class: 'wz-main' }, h('b', { text: ME.name || 'Add your name and photo' }), h('small', { text: ME.bio || 'Your Wizard profile' }),
+      h('button', { type: 'button', class: 'pf-npub', title: ME.npub, onclick: e => copy(e.currentTarget, ME.npub, shortNpub(ME.npub)) }, shortNpub(ME.npub))),
     h('button', { type: 'button', class: 'pf-btn', onclick: editName }, 'Edit')));
   const sec = h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Who sees what'));
   for (const part of ['build', 'skin', 'apps']) {
@@ -135,42 +193,47 @@ function renderFriends() {
   if (ME.requests.length) {
     const reqs = h('ul', { class: 'wz-list' });
     for (const r of ME.requests) reqs.append(h('li', { class: 'pf-item' },
-      h('div', { class: 'wz-main' }, h('b', { text: r.name }), h('small', { text: `${r.login} · wants to be friends` })),
-      h('button', { type: 'button', class: 'pf-chip on', onclick: () => addForm(r) }, 'Add back'),
-      h('button', { type: 'button', class: 'pf-chip', onclick: async () => { ME = await api('api/requests/dismiss', 'POST', { login: r.login }); render(); } }, 'Ignore')));
+      avatar(r, 'sm'),
+      h('div', { class: 'wz-main' }, h('b', { text: r.name }), h('small', { text: `${shortNpub(r.npub)} · wants to be friends` })),
+      r.address ? h('button', { type: 'button', class: 'pf-chip on', onclick: () => accept(r) }, 'Accept') : h('button', { type: 'button', class: 'pf-chip on', onclick: () => addForm(r) }, 'Add back'),
+      h('button', { type: 'button', class: 'pf-chip', onclick: async () => { ME = await api('api/requests/dismiss', 'POST', { npub: r.npub }); render(); } }, 'Ignore')));
     v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Requests'), reqs));
   }
   const list = h('ul', { class: 'wz-list' });
   for (const f of ME.friends) list.append(h('li', {},
     h('button', { type: 'button', class: 'wz-row', onclick: () => openFriend(f) },
-      h('span', { class: 'pf-avatar sm', 'aria-hidden': 'true', text: (f.name || '?').charAt(0).toUpperCase() }),
-      h('span', { class: 'wz-main' }, h('b', { text: f.name }), h('small', { text: f.login })), h('span', { class: 'pf-go', 'aria-hidden': 'true' }, '›'))));
+      avatar(f, 'sm'),
+      h('span', { class: 'wz-main' }, h('b', { text: f.name }), h('small', { text: shortNpub(f.npub) })), h('span', { class: 'pf-go', 'aria-hidden': 'true' }, '›'))));
   v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Friends', ME.friends.length ? h('span', { class: 'wz-count', text: String(ME.friends.length) }) : null),
     ME.friends.length ? list : h('div', { class: 'wz-empty' }, h('div', { class: 'wz-tile', 'aria-hidden': 'true' }, '☺'), h('strong', {}, 'No friends yet'),
-      h('p', {}, 'A friend is someone whose Wizard can reach yours over a private Tailscale connection. Add them with their Profiles link.'))));
+      h('p', {}, 'Swap friend codes with someone. Each code is their Nostr ID plus the private address of their Wizard.'))));
   v.append(h('div', { class: 'pf-publish' }, h('button', { type: 'button', class: 'pf-btn go wide', onclick: () => addForm() }, 'Add a friend')));
-  if (ME.link) {
-    const copy = h('button', { type: 'button', class: 'pf-chip', onclick: async () => { try { await navigator.clipboard.writeText(`${ME.link}\n${ME.you}`); copy.textContent = 'Copied'; } catch (_) { say('Copy failed. Select the link instead.', 'error'); } } }, 'Copy');
-    v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Your link'),
-      h('div', { class: 'pf-item' }, h('div', { class: 'wz-main' }, h('b', { class: 'pf-link', text: ME.link }), h('small', { text: ME.you ? `Send this and your login (${ME.you}) to a friend.` : 'Send this to a friend.' })), copy),
-      h('p', { class: 'pf-hint', text: 'This address only answers friend requests and your shared profile. Your Wizard and apps stay closed to them.' })));
-  }
+  const cp = h('button', { type: 'button', class: 'pf-chip', onclick: e => copy(e.currentTarget, ME.code) }, 'Copy');
+  v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Your friend code'),
+    h('div', { class: 'pf-item' }, h('div', { class: 'wz-main' }, h('b', { class: 'pf-link', text: ME.code }), h('small', { text: 'Send this to a friend. It is your Nostr ID and the address of your Wizard.' })), cp),
+    h('p', { class: 'pf-hint', text: ME.link ? 'That address only answers signed friend requests and what you share. Your Wizard and apps stay closed.' : 'Friends can see your Nostr ID, but your Wizard has no friend address yet. Ask your agent to set one up.' })));
 }
 function addForm(req) {
   const v = $('view-friends');
   const f = h('form', { class: 'pf-edit', onsubmit: async e => {
     e.preventDefault(); const b = f.querySelector('button[type=submit]'); b.disabled = true;
-    try { const out = await api('api/friends', 'POST', { address: a.value, login: l.value, name: n.value }); ME = out.me; render(); say(out.hello === 'sent' ? `${out.friend.name} added. They'll see your request.` : `${out.friend.name} added. Their box didn't answer yet (${out.hello}).`, 'note'); }
+    try { await added(await api('api/friends', 'POST', { code: a.value, name: n.value })); }
     catch (err) { say(err.message, 'error'); b.disabled = false; }
   } });
-  const a = h('input', { class: 'wz-input', required: true, placeholder: 'Their Profiles link, e.g. https://their-box.ts.net:8840/profiles/', 'aria-label': 'Their Profiles link' });
-  const l = h('input', { class: 'wz-input', required: true, placeholder: 'Their Tailscale login, e.g. james@example.com', 'aria-label': 'Their Tailscale login', autocomplete: 'off' });
-  const n = h('input', { class: 'wz-input', placeholder: 'Name (optional)', 'aria-label': 'Name', maxlength: 60 });
-  if (req) { l.value = req.login; n.value = req.name; }
-  f.append(h('h2', { class: 'wz-sec-h' }, req ? `Add ${req.name} back` : 'Add a friend'), a, l, n,
-    h('p', { class: 'pf-hint', text: 'Their login is how your box knows it is really them when they visit. They add you the same way.' }),
+  const a = h('textarea', { class: 'wz-input pf-code', required: true, rows: 2, placeholder: 'Paste their friend code (…/profiles/#npub1…)', 'aria-label': 'Their friend code', autocomplete: 'off', spellcheck: 'false' });
+  const n = h('input', { class: 'wz-input', placeholder: 'Name (optional, their profile fills it in)', 'aria-label': 'Name', maxlength: 60 });
+  if (req) { a.value = req.npub; n.value = req.name; }
+  f.append(h('h2', { class: 'wz-sec-h' }, req ? `Add ${req.name} back` : 'Add a friend'), a, n,
+    h('p', { class: 'pf-hint', text: 'Their Nostr ID is how your Wizard knows it is really them: everything they send is signed with it.' }),
     h('div', { class: 'pf-row-acts' }, h('button', { type: 'submit', class: 'pf-btn go' }, 'Add'), h('button', { type: 'button', class: 'pf-btn', onclick: render }, 'Cancel')));
   v.prepend(f); a.focus();
+}
+async function added(out) {
+  ME = out.me; render();
+  say(out.hello === 'sent' ? `${out.friend.name} added. They'll see your request.` : `${out.friend.name} added. Their Wizard didn't answer yet (${out.hello}).`, 'note');
+}
+async function accept(r) {
+  try { await added(await api('api/friends', 'POST', { address: r.address, npub: r.npub, name: r.name })); } catch (e) { say(e.message, 'error'); }
 }
 async function openFriend(f) {
   FRIEND = { profile: null, friend: f }; show('friend');
@@ -193,8 +256,13 @@ function renderFriend() {
   if (FRIEND.preview) v.append(h('p', { class: 'pf-banner', text: FRIEND.preview === 'friend' ? 'This is what a friend sees.' : 'This is what everyone sees.' }));
   if (FRIEND.error) { v.append(h('div', { class: 'wz-empty' }, h('strong', {}, `Couldn't reach ${f.name || 'them'}`), h('p', { text: FRIEND.error }))); return; }
   if (!p) { v.append(h('p', { class: 'pf-hint', text: 'Asking their Wizard…' })); return; }
-  v.append(h('div', { class: 'pf-who' }, h('div', { class: 'pf-avatar', 'aria-hidden': 'true', text: (p.name || '?').charAt(0).toUpperCase() }),
-    h('div', { class: 'wz-main' }, h('b', { text: p.name }), h('small', { text: p.bio || (p.published_at ? `Updated ${ago(p.published_at)}` : 'Nothing shared yet') }))));
+  v.append(h('div', { class: 'pf-who' }, avatar(p),
+    h('div', { class: 'wz-main' }, h('b', { text: p.name }), h('small', { text: p.bio || (p.published_at ? `Updated ${ago(p.published_at)}` : 'Nothing shared yet') }),
+      p.npub ? h('span', { class: 'pf-npub static', title: p.npub }, (p.signed ? '✓ ' : '') + shortNpub(p.npub)) : null)));
+  if (p.messenger && !FRIEND.preview) {
+    const mb = h('button', { type: 'button', class: 'pf-chip', onclick: e => copy(e.currentTarget, p.messenger, 'Copy Messenger address') }, 'Copy Messenger address');
+    v.append(h('div', { class: 'pf-row-acts' }, h('a', { class: 'pf-btn go', href: '/messenger/' }, 'Message in Messenger'), mb));
+  }
   const nothing = !p.build && !p.skin && !p.apps;
   if (nothing) v.append(h('div', { class: 'wz-empty' }, h('strong', {}, 'Nothing shared with you yet'), h('p', {}, p.viewer === 'visitor' ? "Their box doesn't know you as a friend yet. Ask them to add you." : 'They haven\'t published anything for friends.')));
   if (p.build) {

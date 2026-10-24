@@ -9,9 +9,9 @@
   "categories": [
     "social"
   ],
-  "description": "Share your build, your look and your App Store apps as Private, Friends or Everyone. Friends reach you over a private Tailscale connection; local apps never show.",
-  "tipi_version": 1,
-  "version": "0.1.0",
+  "description": "Your Wizard profile with its own Nostr ID. Share your build, your look and your App Store apps as Private, Friends or Everyone. Local apps never show.",
+  "tipi_version": 2,
+  "version": "0.2.0",
   "source": "https://github.com/oscarhenrycollins/profiles",
   "exposable": false,
   "supported_architectures": [
@@ -27,8 +27,8 @@
   "form_fields": [
     {
       "type": "text",
-      "label": "Your Tailscale login (who owns this profile)",
-      "hint": "The email you sign in to Tailscale with. Only this login can change your profile.",
+      "label": "Who can edit this profile (your Tailscale login)",
+      "hint": "Only used to let your own Wizard screens edit the profile. It is never shown or shared; your profile ID is a Nostr ID.",
       "required": true,
       "env_variable": "PROFILES_OWNER_LOGINS"
     },

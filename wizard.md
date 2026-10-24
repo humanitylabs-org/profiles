@@ -47,4 +47,4 @@ Your Wizard profile has three parts, and each one is Private, Friends or Everyon
 
 Nothing is shared until you tap Publish, and others only ever see that frozen copy.
 
-Friends are people whose Wizard reaches yours over a private Tailscale connection. Add one with their Profiles link and Tailscale login; they add you the same way. Your box knows who is visiting from Tailscale itself, so nobody can pretend to be your friend.
+Your profile's ID is a Nostr ID (npub) that your Wizard makes for itself. Add a friend by pasting their friend code: their Nostr ID plus the private address of their Wizard. Every friend request and every shared profile is signed with the sender's Nostr ID and checked on arrival, so nobody can pretend to be your friend. Tailscale is only the private road between the two Wizards, never your identity.

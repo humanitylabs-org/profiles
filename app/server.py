@@ -5,14 +5,15 @@ shared: an app counts only when the Wizard App Index lists its public repo, a bu
 public shell code anyone can fetch, a look only as sanitised CSS (the owner's My skin, read by the view from the shell). Others see a frozen snapshot taken when the owner
 taps Publish, never live state.
 
-Who is asking comes from the connection, never from the request body:
-  - not through Tailscale Serve (box-local: the agent's MCP gateway, other code on this box)      -> owner
-  - through Serve with Tailscale-User-Login in OWNER_LOGINS                                       -> owner
-  - through Serve as an accepted friend's login                                                   -> friend
-  - through Serve as anyone else, or with no login (tagged nodes)                                 -> visitor
-Serve sets the login header and strips any copy a client sends; the app's own port is loopback-only.
-Friends are people whose box can reach yours over a private Tailscale connection: that is the gate for trying
-on someone's build, which runs their code on your data.
+Identity is Nostr, never email. This Wizard has its own Nostr key (made on first start, kept in app-data): its npub
+is the profile's ID, friends are added by npub, and every friend request, profile request and profile answer is a
+Nostr event signed by the sender's key (NIP-98 for requests, a kind 30078 event for the answer), checked on arrival.
+Tailscale is only the private road between boxes, never the identity.
+
+Who may change the profile:
+  - box-local callers (the agent's MCP gateway)                                                    -> owner
+  - the owner's own Wizard screens (through Tailscale Serve on this box's private shell address)   -> owner
+Everyone else only reaches /api/friend/* and gets what their signed Nostr ID may see (friend) or the public parts.
 
 Stdlib only.
 """
@@ -32,7 +33,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path(os.environ.get('APP_ROOT', '.')).resolve()
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'profiles'
-VERSION = '0.1.0'
+VERSION = '0.2.0'
 INDEX = os.environ.get('WIZARD_APP_INDEX', 'https://apps.aiwizards.com').rstrip('/')
 SHELL_REPO = os.environ.get('PROFILES_SHELL_REPO', 'humanitylabs-org/wizard-ux')
 SKINS = Path(os.environ.get('SKINS_DIR', '/skins'))   # the owner's Files Skins folder, read-only
@@ -50,7 +51,6 @@ REPO = re.compile(r'^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$')
 SHA = re.compile(r'^[0-9a-f]{7,40}$')
 FULL_SHA = re.compile(r'^[0-9a-f]{40}$')
 SKIN_ID = re.compile(r'^[a-z0-9-]{1,40}$')
-LOGIN = re.compile(r'^[^\s@]{1,128}@[^\s@]{1,190}$')
 MAX_CSS = 64 * 1024
 
 
@@ -58,6 +58,214 @@ class Problem(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code, self.message = code, message
+
+
+# ---------- Nostr: npub/bech32, BIP-340 sign/verify (stdlib only) ----------
+# Identity is a Nostr key, not an email. This box holds its own Wizard key (spec/WIZARD_ID.md "Your Wizard's own
+# key"): it signs every profile answer and every friend request, and asks friends' boxes for their profile with a
+# NIP-98 signed request. Friends are recognised by their npub; Tailscale is only the private road between boxes.
+
+_CS = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
+_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+_G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+      0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+
+def _polymod(values):
+    gen, chk = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3], 1
+    for v in values:
+        top = chk >> 25
+        chk = (chk & 0x1ffffff) << 5 ^ v
+        for i in range(5):
+            chk ^= gen[i] if (top >> i) & 1 else 0
+    return chk
+
+
+def _hrp(h):
+    return [ord(x) >> 5 for x in h] + [0] + [ord(x) & 31 for x in h]
+
+
+def _bits(data, f, t, pad):
+    acc = bits = 0
+    out, maxv = [], (1 << t) - 1
+    for v in data:
+        acc = (acc << f) | v
+        bits += f
+        while bits >= t:
+            bits -= t
+            out.append((acc >> bits) & maxv)
+    if pad and bits:
+        out.append((acc << (t - bits)) & maxv)
+    elif not pad and (bits >= f or (acc << (t - bits)) & maxv):
+        raise ValueError('bad padding')
+    return out
+
+
+def npub_encode(hexkey):
+    vals = _bits(bytes.fromhex(hexkey), 8, 5, True)
+    chk = _polymod(_hrp('npub') + vals + [0] * 6) ^ 1
+    return 'npub1' + ''.join(_CS[v] for v in vals + [(chk >> 5 * (5 - i)) & 31 for i in range(6)])
+
+
+def npub_decode(npub):
+    s = str(npub or '').strip().lower()
+    if s.startswith('nostr:'):
+        s = s[6:]
+    hrp, _, data = s.rpartition('1')
+    if hrp != 'npub' or not data or any(c not in _CS for c in data):
+        raise Problem(400, 'That is not a Nostr ID (npub1…).')
+    vals = [_CS.index(c) for c in data]
+    if _polymod(_hrp(hrp) + vals) != 1:
+        raise Problem(400, 'That Nostr ID has a typo (checksum).')
+    raw = bytes(_bits(vals[:-6], 5, 8, False))
+    if len(raw) != 32:
+        raise Problem(400, 'That Nostr ID is the wrong length.')
+    return raw.hex()
+
+
+def _add(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    if a[0] == b[0] and a[1] != b[1]:
+        return None
+    lam = (3 * a[0] * a[0] * pow(2 * a[1], _P - 2, _P) if a == b else (b[1] - a[1]) * pow(b[0] - a[0], _P - 2, _P)) % _P
+    x = (lam * lam - a[0] - b[0]) % _P
+    return (x, (lam * (a[0] - x) - a[1]) % _P)
+
+
+def _mul(p, n):
+    r = None
+    while n:
+        if n & 1:
+            r = _add(r, p)
+        p, n = _add(p, p), n >> 1
+    return r
+
+
+def _tag_hash(tag, msg):
+    t = hashlib.sha256(tag.encode()).digest()
+    return hashlib.sha256(t + t + msg).digest()
+
+
+def _lift_x(x):
+    if x >= _P:
+        return None
+    y2 = (pow(x, 3, _P) + 7) % _P
+    y = pow(y2, (_P + 1) // 4, _P)
+    return None if y * y % _P != y2 else (x, y if y % 2 == 0 else _P - y)
+
+
+def schnorr_sign(msg, seckey):
+    d0 = int.from_bytes(seckey, 'big')
+    P = _mul(_G, d0)
+    d = d0 if P[1] % 2 == 0 else _N - d0
+    px = P[0].to_bytes(32, 'big')
+    t = (d ^ int.from_bytes(_tag_hash('BIP0340/aux', secrets.token_bytes(32)), 'big')).to_bytes(32, 'big')
+    k0 = int.from_bytes(_tag_hash('BIP0340/nonce', t + px + msg), 'big') % _N
+    R = _mul(_G, k0)
+    k = k0 if R[1] % 2 == 0 else _N - k0
+    rx = R[0].to_bytes(32, 'big')
+    e = int.from_bytes(_tag_hash('BIP0340/challenge', rx + px + msg), 'big') % _N
+    return rx + ((k + e * d) % _N).to_bytes(32, 'big')
+
+
+def schnorr_verify(msg, pubkey, sig):
+    if len(pubkey) != 32 or len(sig) != 64:
+        return False
+    pt = _lift_x(int.from_bytes(pubkey, 'big'))
+    r, s = int.from_bytes(sig[:32], 'big'), int.from_bytes(sig[32:], 'big')
+    if pt is None or r >= _P or s >= _N:
+        return False
+    e = int.from_bytes(_tag_hash('BIP0340/challenge', sig[:32] + pubkey + msg), 'big') % _N
+    R = _add(_mul(_G, s), _mul(pt, _N - e))
+    return R is not None and R[1] % 2 == 0 and R[0] == r
+
+
+def event_id(ev):
+    ser = json.dumps([0, ev['pubkey'], ev['created_at'], ev['kind'], ev['tags'], ev['content']], separators=(',', ':'), ensure_ascii=False)
+    return hashlib.sha256(ser.encode()).hexdigest()
+
+
+def verify_event(ev):
+    try:
+        return isinstance(ev, dict) and event_id(ev) == ev['id'] and schnorr_verify(bytes.fromhex(ev['id']), bytes.fromhex(ev['pubkey']), bytes.fromhex(ev['sig']))
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+_KEY = None
+
+
+def box_key():
+    """This Wizard's own key: made once on first start, kept 0600 in app-data, never leaves the app."""
+    global _KEY
+    if _KEY:
+        return _KEY
+    path = DATA / 'wizard-key.json'
+    try:
+        sk = bytes.fromhex(json.loads(path.read_text())['secret'])
+    except (OSError, ValueError, KeyError):
+        sk = secrets.token_bytes(32)
+        while not 0 < int.from_bytes(sk, 'big') < _N:
+            sk = secrets.token_bytes(32)
+        DATA.mkdir(parents=True, exist_ok=True)
+        tmp = DATA / f'.key.{secrets.token_hex(4)}.tmp'
+        tmp.write_text(json.dumps({'secret': sk.hex()}))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    _KEY = (sk, _mul(_G, int.from_bytes(sk, 'big'))[0].to_bytes(32, 'big').hex())
+    return _KEY
+
+
+def sign_event(kind, content, tags=()):
+    sk, pk = box_key()
+    ev = {'pubkey': pk, 'created_at': int(time.time()), 'kind': kind, 'tags': [list(t) for t in tags], 'content': content}
+    ev['id'] = event_id(ev)
+    ev['sig'] = schnorr_sign(bytes.fromhex(ev['id']), sk).hex()
+    return ev
+
+
+def box_npub():
+    return npub_encode(box_key()[1])
+
+
+_seen_auth = {}
+
+
+def nip98_pubkey(headers, method, path_suffix):
+    """Pubkey of a valid NIP-98 `Authorization: Nostr <base64 event>` for this request, or ''."""
+    raw = (headers.get('Authorization') or '').strip()
+    if not raw.lower().startswith('nostr '):
+        return ''
+    try:
+        import base64
+        ev = json.loads(base64.b64decode(raw[6:].strip(), validate=True))
+    except (ValueError, TypeError):
+        return ''
+    if not verify_event(ev) or ev.get('kind') != 27235 or abs(int(ev.get('created_at', 0)) - time.time()) > 60:
+        return ''
+    tags = {t[0]: t[1] for t in ev.get('tags', []) if isinstance(t, list) and len(t) >= 2}
+    if tags.get('method', '').upper() != method or not urlsplit(tags.get('u', '')).path.endswith(path_suffix):
+        return ''
+    fwd = (headers.get('X-Forwarded-Host') or '').lower()
+    if fwd and urlsplit(tags.get('u', '')).netloc.lower() != fwd:
+        return ''
+    now_ = time.time()
+    for k in [k for k, t in _seen_auth.items() if t < now_ - 120]:
+        _seen_auth.pop(k, None)
+    if ev['id'] in _seen_auth:
+        return ''                                  # replayed
+    _seen_auth[ev['id']] = now_
+    return ev['pubkey']
+
+
+def nip98_header(url, method):
+    import base64
+    ev = sign_event(27235, '', [('u', url), ('method', method)])
+    return 'Nostr ' + base64.b64encode(json.dumps(ev).encode()).decode()
 
 
 def now():
@@ -77,7 +285,7 @@ def _text(v, name, limit, required=False):
 # ---------- storage: one JSON file, atomic replace ----------
 
 def _blank():
-    return {'name': '', 'bio': '', 'visibility': {s: 'private' for s in SECTIONS}, 'hidden': [], 'uses': [],
+    return {'name': '', 'bio': '', 'picture': '', 'messenger': '', 'visibility': {s: 'private' for s in SECTIONS}, 'hidden': [], 'uses': [],
             'snapshot': None, 'friends': [], 'requests': [], 'activity': [], 'look_backup': None, 'wearing': None}
 
 
@@ -90,6 +298,9 @@ def load():
     if isinstance(s, dict):
         out.update({k: s[k] for k in out if k in s and (type(s[k]) is type(out[k]) or (out[k] is None and isinstance(s[k], dict)))})
     out['visibility'] = {k: out['visibility'].get(k) if out['visibility'].get(k) in LEVELS else 'private' for k in SECTIONS}
+    # Friends and requests are Nostr IDs; older email-based entries (before 0.2) are dropped.
+    out['friends'] = [f for f in out['friends'] if isinstance(f, dict) and re.fullmatch(r'[0-9a-f]{64}', str(f.get('pubkey', '')))]
+    out['requests'] = [r for r in out['requests'] if isinstance(r, dict) and re.fullmatch(r'[0-9a-f]{64}', str(r.get('pubkey', '')))]
     return out
 
 
@@ -311,7 +522,8 @@ def view_for(role, s=None):
     s = s or load()
     allowed = {'owner': LEVELS, 'friend': ('friends', 'public'), 'visitor': ('public',)}[role]
     snap = s['snapshot'] or {}
-    out = {'app': APP_ID, 'version': VERSION, 'viewer': role, 'name': s['name'] or 'A Wizard owner', 'bio': s['bio'],
+    out = {'app': APP_ID, 'version': VERSION, 'viewer': role, 'npub': box_npub(), 'name': s['name'] or 'A Wizard owner',
+           'bio': s['bio'], 'picture': s['picture'], 'messenger': s['messenger'] if role != 'visitor' else '',
            'published_at': snap.get('published_at'), 'fingerprint': snap.get('fingerprint')}
     hidden, uses = set(s['hidden']), set(s['uses'])
     for part in SECTIONS:
@@ -330,58 +542,115 @@ def via_serve(headers):
     return host.endswith('.ts.net') or bool(headers.get('X-Forwarded-For'))
 
 
-def role_of(headers):
+def role_of(headers, method='GET', path=''):
+    """owner = this box (or the owner's own Wizard screens); friend = a request signed by a friend's Nostr ID."""
     if not via_serve(headers):
         return 'owner', ''
     login = (headers.get('Tailscale-User-Login') or '').strip().lower()
-    if login and login in OWNER_LOGINS:
-        return 'owner', login
-    if login and any(f['login'] == login for f in load()['friends']):
-        return 'friend', login
-    return 'visitor', login
+    if login and login in OWNER_LOGINS and not headers.get('Authorization'):
+        return 'owner', ''
+    pk = nip98_pubkey(headers, method, path) if path else ''
+    if pk and any(f['pubkey'] == pk for f in load()['friends']):
+        return 'friend', pk
+    return 'visitor', pk
 
 
-# ---------- friends ----------
+# ---------- friends: Nostr IDs, Tailscale only as the road ----------
 
 def clean_address(v):
     v = _text(v, 'profile link', 300, True)
     u = urlsplit(v if '://' in v else 'https://' + v)
-    if u.scheme != 'https' or not u.hostname or u.username or u.password or u.query or u.fragment:
-        raise Problem(400, 'Use the https link to their Profiles app, like https://their-box.example.ts.net/profiles/')
+    if u.scheme != 'https' or not u.hostname or u.username or u.password or u.query:
+        raise Problem(400, 'Use their friend code, like https://their-box.ts.net:8842/profiles/#npub1…')
     path = (u.path or '/').rstrip('/') + '/'
     if not path.endswith('/profiles/'):
         path = path.rstrip('/') + '/profiles/'
     return f'https://{u.netloc.lower()}{path}'
 
 
+def parse_code(body):
+    """A friend code is their link with their Nostr ID after '#'. Link and npub may also come separately."""
+    code = str(body.get('code') or '').strip()
+    address, npub = str(body.get('address') or ''), str(body.get('npub') or '')
+    if code:
+        m = re.search(r'npub1[02-9ac-hj-np-z]{20,}', code.lower())
+        if m:
+            npub = npub or m.group(0)
+        link = code.split('#', 1)[0].strip()
+        if link.lower().startswith(('https://', 'http://')) or '.' in link.split('/')[0]:
+            address = address or link
+    if not npub:
+        raise Problem(400, 'Paste their friend code (it ends with their Nostr ID, npub1…).')
+    if not address:
+        raise Problem(400, 'Their friend code has no link to their Wizard.')
+    return clean_address(address), npub_decode(npub)
+
+
+def my_code():
+    return f"{FRIEND_LINK}#{box_npub()}" if FRIEND_LINK else box_npub()
+
+
 def add_friend(body):
     if not isinstance(body, dict):
         raise Problem(400, 'Expected an object.')
-    address = clean_address(body.get('address'))
-    login = _text(body.get('login'), 'their Tailscale login', 320, True).lower()
-    if not LOGIN.fullmatch(login):
-        raise Problem(400, 'Their Tailscale login looks like name@example.com.')
-    if login in OWNER_LOGINS:
+    address, pk = parse_code(body)
+    if pk == box_key()[1]:
         raise Problem(400, 'That is you.')
     with LOCK:
         s = load()
-        f = next((f for f in s['friends'] if f['login'] == login), None)
+        f = next((f for f in s['friends'] if f['pubkey'] == pk), None)
         if not f:
-            f = {'id': secrets.token_hex(4), 'login': login, 'added_at': now()}
+            f = {'id': secrets.token_hex(4), 'pubkey': pk, 'npub': npub_encode(pk), 'added_at': now()}
             s['friends'].append(f)
+        req = next((r for r in s['requests'] if r['pubkey'] == pk), {})
         f['address'] = address
-        f['name'] = _text(body.get('name'), 'name', 60) or f.get('name') or login.split('@')[0]
-        s['requests'] = [r for r in s['requests'] if r['login'] != login]
+        f['name'] = _text(body.get('name'), 'name', 60) or req.get('name') or f.get('name') or f['npub'][:12] + '…'
+        if req.get('picture'):
+            f['picture'] = req['picture']
+        s['requests'] = [r for r in s['requests'] if r['pubkey'] != pk]
         log(s, f"Added {f['name']} as a friend")
         save(s)
-        name = s['name'] or 'A Wizard friend'
-    # Say hello so their box can offer to add you back. Their Tailscale tells them who you are; nobody can fake it.
+        hello_body = {'name': s['name'] or 'A Wizard friend', 'address': FRIEND_LINK, 'picture': s['picture']}
+    # Say hello, signed with this Wizard's Nostr ID, so their box can offer to add you back. Nobody can fake it.
     try:
-        fetch_json(address + 'api/friend/hello', {'name': name}, timeout=6)
+        url = address + 'api/friend/hello'
+        signed_post(url, hello_body)
         hello_state = 'sent'
     except Problem as p:
         hello_state = p.message
     return {'friend': f, 'hello': hello_state, 'me': me()}
+
+
+def signed_post(url, body, timeout=6):
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method='POST', headers={
+        'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': f'wizard-profiles/{VERSION}',
+        'Authorization': nip98_header(url, 'POST')})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read(65536) or b'{}')
+    except urllib.error.HTTPError as e:
+        raise Problem(e.code if 400 <= e.code < 500 else 502, f'Their Wizard said no ({e.code}).') from None
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        raise Problem(502, f'Could not reach {urlsplit(url).hostname}.') from None
+
+
+def signed_get(url, timeout=8):
+    req = urllib.request.Request(url, headers={'Accept': 'application/json', 'User-Agent': f'wizard-profiles/{VERSION}',
+                                               'Authorization': nip98_header(url, 'GET')})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read(1024 * 1024 + 1)
+    except urllib.error.HTTPError as e:
+        raise Problem(e.code if 400 <= e.code < 500 else 502, f'Their Wizard said no ({e.code}).') from None
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise Problem(502, f'Could not reach {urlsplit(url).hostname}.') from None
+    if len(raw) > 1024 * 1024:
+        raise Problem(502, 'Answer too large.')
+    try:
+        return json.loads(raw)
+    except ValueError:
+        raise Problem(502, 'Not a profile answer.') from None
 
 
 def remove_friend(fid):
@@ -391,39 +660,58 @@ def remove_friend(fid):
         if not gone:
             raise Problem(404, 'No friend with that id.')
         s['friends'] = [f for f in s['friends'] if f['id'] != fid]
-        log(s, f"Removed {gone.get('name') or gone['login']}")
+        log(s, f"Removed {gone.get('name') or gone['npub']}")
         save(s)
     return me()
 
 
-def hello(role, login, body):
-    if role == 'owner' or not login:
-        raise Problem(400, 'A friend request has to come from another person over Tailscale.')
+def hello(pk, body):
+    if not pk:
+        raise Problem(401, 'A friend request must be signed with a Nostr ID.')
+    if pk == box_key()[1]:
+        raise Problem(400, 'That is you.')
+    body = body if isinstance(body, dict) else {}
     with LOCK:
         s = load()
-        if any(f['login'] == login for f in s['friends']):
+        if any(f['pubkey'] == pk for f in s['friends']):
             return {'ok': True, 'friend': True}
-        name = _text((body or {}).get('name'), 'name', 60) or login.split('@')[0]
-        s['requests'] = [r for r in s['requests'] if r['login'] != login][-19:] + [{'login': login, 'name': name, 'at': now()}]
-        log(s, f'{name} ({login}) asked to be friends')
+        try:
+            address = clean_address(body.get('address')) if body.get('address') else ''
+        except Problem:
+            address = ''
+        name = _text(str(body.get('name') or '')[:60], 'name', 60) or npub_encode(pk)[:12] + '…'
+        pic = body.get('picture') if valid_picture(body.get('picture')) else ''
+        s['requests'] = [r for r in s['requests'] if r['pubkey'] != pk][-19:] + [
+            {'pubkey': pk, 'npub': npub_encode(pk), 'name': name, 'address': address, 'picture': pic, 'at': now()}]
+        log(s, f'{name} asked to be friends')
         save(s)
     return {'ok': True, 'friend': False}
 
 
-def dismiss_request(login):
+def dismiss_request(npub):
+    pk = npub_decode(npub)
     with LOCK:
         s = load()
-        s['requests'] = [r for r in s['requests'] if r['login'] != login]
+        s['requests'] = [r for r in s['requests'] if r['pubkey'] != pk]
         save(s)
     return me()
 
 
+PICTURE = re.compile(r'^data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]{100,140000}$')
+
+
+def valid_picture(v):
+    return isinstance(v, str) and bool(PICTURE.fullmatch(v))
+
+
 def clean_remote(p, f):
     """A friend's answer, re-checked here: their box can never make a private app look public or ship unsafe CSS."""
-    out = {'friend': {k: f.get(k) for k in ('id', 'name', 'login', 'address')}, 'viewer': str(p.get('viewer') or '')[:10],
-           'name': str(p.get('name') or f.get('name') or '')[:60], 'bio': str(p.get('bio') or '')[:400],
+    out = {'friend': {k: f.get(k) for k in ('id', 'name', 'npub', 'address')}, 'viewer': str(p.get('viewer') or '')[:10],
+           'npub': f.get('npub'), 'name': str(p.get('name') or f.get('name') or '')[:60], 'bio': str(p.get('bio') or '')[:400],
+           'picture': p.get('picture') if valid_picture(p.get('picture')) else '',
+           'messenger': p.get('messenger') if re.fullmatch(r'npub1[02-9ac-hj-np-z]{58}', str(p.get('messenger') or '')) else '',
            'published_at': str(p.get('published_at') or '')[:20], 'fingerprint': str(p.get('fingerprint') or '')[:16],
-           'build': None, 'skin': None, 'apps': None}
+           'build': None, 'skin': None, 'apps': None, 'signed': True}
     b = p.get('build')
     if isinstance(b, dict) and b.get('repo') == SHELL_REPO and FULL_SHA.fullmatch(str(b.get('commit', ''))) \
             and public_commit(SHELL_REPO, b['commit']) == b['commit']:
@@ -448,23 +736,48 @@ def clean_remote(p, f):
     return out
 
 
+PROFILE_KIND = 30078   # NIP-78 app data, d=wizard-profile: the whole answer is a signed Nostr event
+
+
+def signed_profile(role):
+    v = view_for(role)
+    return sign_event(PROFILE_KIND, json.dumps(v, separators=(',', ':')), [('d', 'wizard-profile'), ('viewer', role)])
+
+
 def friend_profile(fid):
     f = next((f for f in load()['friends'] if f['id'] == fid), None)
     if not f:
         raise Problem(404, 'No friend with that id.')
-    return clean_remote(fetch_json(f['address'] + 'api/friend/profile'), f)
+    ev = signed_get(f['address'] + 'api/friend/profile')
+    # Only an answer signed by the Nostr ID you added counts; anything else is somebody else talking.
+    if not verify_event(ev) or ev.get('pubkey') != f['pubkey'] or ev.get('kind') != PROFILE_KIND or abs(int(ev.get('created_at', 0)) - time.time()) > 300:
+        raise Problem(502, f"That answer was not signed by {f.get('name') or 'their'} Nostr ID, so it was ignored.")
+    try:
+        p = json.loads(ev['content'])
+    except (ValueError, TypeError):
+        raise Problem(502, 'Their profile could not be read.') from None
+    out = clean_remote(p if isinstance(p, dict) else {}, f)
+    with LOCK:                                         # keep their name and photo fresh in your list
+        s = load()
+        for x in s['friends']:
+            if x['id'] == fid:
+                x['name'] = out['name'] or x['name']
+                x['picture'] = out['picture'] or x.get('picture', '')
+        save(s)
+    return out
 
 
 def me():
     s = load()
-    return {**{k: s[k] for k in ('name', 'bio', 'visibility', 'hidden', 'uses', 'snapshot', 'friends', 'requests', 'wearing')},
-            'look_saved': bool(s.get('look_backup')), 'you': sorted(OWNER_LOGINS)[0] if OWNER_LOGINS else '', 'link': FRIEND_LINK, 'activity': list(reversed(s['activity'][-20:])), 'shell_repo': SHELL_REPO}
+    return {**{k: s[k] for k in ('name', 'bio', 'picture', 'messenger', 'visibility', 'hidden', 'uses', 'snapshot', 'friends', 'requests', 'wearing')},
+            'npub': box_npub(), 'code': my_code(), 'link': FRIEND_LINK, 'look_saved': bool(s.get('look_backup')),
+            'activity': list(reversed(s['activity'][-20:])), 'shell_repo': SHELL_REPO}
 
 
 def update_me(body):
     if not isinstance(body, dict):
         raise Problem(400, 'Expected an object.')
-    unknown = set(body) - {'name', 'bio', 'visibility', 'hidden', 'uses'}
+    unknown = set(body) - {'name', 'bio', 'picture', 'messenger', 'visibility', 'hidden', 'uses'}
     if unknown:
         raise Problem(400, 'Unknown field: ' + ', '.join(sorted(unknown)) + '.')
     with LOCK:
@@ -473,6 +786,15 @@ def update_me(body):
             s['name'] = _text(body['name'], 'name', 60)
         if 'bio' in body:
             s['bio'] = _text(body['bio'], 'bio', 280)
+        if 'picture' in body:
+            if body['picture'] not in ('', None) and not valid_picture(body['picture']):
+                raise Problem(400, 'The photo must be a small JPEG, PNG or WebP.')
+            s['picture'] = body['picture'] or ''
+        if 'messenger' in body:
+            m = str(body['messenger'] or '').strip()
+            if m:
+                npub_decode(m)
+            s['messenger'] = m
         if 'visibility' in body:
             v = body['visibility']
             if not isinstance(v, dict) or not v or any(k not in SECTIONS or v[k] not in LEVELS for k in v):
@@ -497,7 +819,7 @@ def update_me(body):
 # ---------- MCP (same service layer as the view) ----------
 
 TOOLS = [
-    {'name': 'profile_get', 'description': "The owner's Wizard profile: who sees the build, look and apps (private, friends, public), the published snapshot, friends and pending friend requests.",
+    {'name': 'profile_get', 'description': "The owner's Wizard profile and Nostr ID (npub): who sees the build, look and apps (private, friends, public), the published snapshot, friends and pending friend requests.",
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
     {'name': 'profile_preview', 'description': "Exactly what a friend, or anyone else, sees of the owner's profile right now.",
      'inputSchema': {'type': 'object', 'properties': {'as': {'type': 'string', 'enum': ['friend', 'public']}}, 'required': ['as'], 'additionalProperties': False},
@@ -505,7 +827,7 @@ TOOLS = [
     {'name': 'profile_set_visibility', 'description': 'Set who sees one part of the profile: build, skin or apps -> private, friends or public. Only when the owner asked.',
      'inputSchema': {'type': 'object', 'properties': {'part': {'type': 'string', 'enum': list(SECTIONS)}, 'level': {'type': 'string', 'enum': list(LEVELS)}},
                      'required': ['part', 'level'], 'additionalProperties': False}},
-    {'name': 'friends_list', 'description': 'Friends (people whose box reaches this one over a private Tailscale connection) and pending friend requests.',
+    {'name': 'friends_list', 'description': 'Friends (by Nostr ID; their Wizard reaches this one over a private connection) and pending friend requests.',
      'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}, 'annotations': {'readOnlyHint': True}},
     {'name': 'friend_profile', 'description': "Read a friend's profile from their box: their build, look and App Store apps, whatever they share with friends.",
      'inputSchema': {'type': 'object', 'properties': {'id': {'type': 'string', 'description': 'Friend id from friends_list'}}, 'required': ['id'], 'additionalProperties': False},
@@ -559,8 +881,8 @@ _PORT = os.environ.get('PORT', '8836')
 _LOOPBACK = {f'127.0.0.1:{_PORT}', f'localhost:{_PORT}', f'{APP_ID}:{_PORT}'}
 TRUSTED_HOSTS = _csv('WIZARD_TRUSTED_HOSTS') | _LOOPBACK
 TRUSTED_ORIGINS = _csv('WIZARD_TRUSTED_ORIGINS') | {'http://' + h for h in _LOOPBACK}
-# A friend reaches this box by its own tailnet name, on whichever Serve port; their login decides what they get.
-FRIEND_PATHS = ('/api/friend/profile', '/api/friend/hello', '/healthz')
+# A friend reaches this box by its own tailnet name, on whichever Serve port; their signed Nostr ID decides what they get.
+FRIEND_PATHS = ('/api/friend/profile', '/api/friend/hello', '/api/friend/id', '/healthz')
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -587,7 +909,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(b)))
         self.send_header('Cache-Control', 'no-store')
         self.send_header('X-Content-Type-Options', 'nosniff')
-        self.send_header('Content-Security-Policy', "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
+        self.send_header('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'")
         self.end_headers()
         if self.command != 'HEAD':
             self.wfile.write(b)
@@ -615,7 +937,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/healthz':
                 return self.send(200, {'ok': True, 'app': APP_ID, 'version': VERSION})
             if path == '/api/friend/profile':
-                return self.send(200, view_for(role_of(self.headers)[0]))
+                # The answer is a Nostr event signed by this Wizard's key, so the asker can check who wrote it.
+                return self.send(200, signed_profile(role_of(self.headers, 'GET', '/api/friend/profile')[0]))
+            if path == '/api/friend/id':
+                return self.send(200, {'npub': box_npub(), 'name': load()['name']})
             if path.startswith('/api/') and self.owner_only():
                 return
             if path == '/api/me':
@@ -645,8 +970,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = self.body()
             if path == '/api/friend/hello':
-                role, login = role_of(self.headers)
-                return self.send(200, hello(role, login, body if isinstance(body, dict) else {}))
+                return self.send(200, hello(nip98_pubkey(self.headers, 'POST', '/api/friend/hello'), body))
             if self.owner_only():
                 return
             if path == '/mcp':
@@ -661,7 +985,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == '/api/look/restore':
                 return self.send(200, take_look_backup())
             if path == '/api/requests/dismiss':
-                return self.send(200, dismiss_request(_text((body or {}).get('login'), 'login', 320, True).lower()))
+                return self.send(200, dismiss_request(str((body or {}).get('npub') or '')))
             self.send(404, {'error': 'Not found.'})
         except Problem as e:
             self.send(e.code, {'error': e.message})

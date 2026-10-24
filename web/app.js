@@ -33,7 +33,7 @@ async function api(path, method = 'GET', body) {
 }
 const ago = iso => { if (!iso) return ''; const s = (Date.now() - Date.parse(iso)) / 1000; if (!(s >= 0)) return ''; if (s < 90) return 'just now'; if (s < 5400) return Math.round(s / 60) + ' min ago'; if (s < 129600) return Math.round(s / 3600) + ' h ago'; return Math.round(s / 86400) + ' days ago'; };
 const shell = () => { try { return parent !== window ? parent : null; } catch (_) { return null; } };
-const shortNpub = n => n ? n.slice(0, 10) + '…' + n.slice(-6) : '';
+const shortNpub = n => n ? n.slice(0, 14) + '…' + n.slice(-8) : '';
 async function copy(btn, text, label) {
   label = label || btn.textContent;
   try { await navigator.clipboard.writeText(text); btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = label; }, 1600); }
@@ -125,6 +125,7 @@ async function setLevel(part, level) {
   catch (e) { say(e.message, 'error'); } finally { busy = false; }
 }
 async function reloadMe() { try { ME = await api('api/me'); render(); } catch (_) {} }
+const hintFor = (part, yes, no) => ME.visibility[part] === 'private' ? no : yes;
 function card(title, sub, level, body, hint) {
   return h('section', { class: 'pf-card' },
     h('div', { class: 'pf-card-h' }, h('div', { class: 'wz-main' }, h('b', { text: title }), sub ? h('small', { text: sub }) : null)),
@@ -133,7 +134,7 @@ function card(title, sub, level, body, hint) {
 function shareLine() {
   const n = ME.friends.length, pub = Object.entries(ME.visibility).some(([k, v]) => k !== 'card' && v === 'public');
   const anything = Object.entries(ME.visibility).some(([k, v]) => k !== 'card' && v !== 'private');
-  if (!n && !pub) return anything ? 'Add a friend to start sharing.' : 'Nothing is shared. Choose who sees each part below.';
+  if (!n && !pub) return anything ? 'Add a friend on the Friends tab to start sharing.' : 'Your look, build and apps are only yours right now. Friends you add see your name and photo.';
   const who = [n ? `${n} friend${n === 1 ? '' : 's'}` : '', pub ? 'everyone with your Nostr ID' : ''].filter(Boolean).join(' and ');
   if (ME.sync && !ME.sync.reached && ME.sync.stored) return `Shared with ${who}. Couldn't reach Nostr just now; your Wizard will try again.`;
   return `Shared with ${who}${ME.shared_at ? ` · up to date ${ago(ME.shared_at)}` : ''}. Changes share by themselves.`;
@@ -154,13 +155,13 @@ function renderMe() {
   const live = currentSkin(), sk = snap?.skin;
   v.append(card('Look', sk ? sk.name + (sk.css ? ' + your own touches' : '') : live.name, levelPicker('skin', ['private', 'friends', 'public']),
     h('div', { class: 'pf-skin' }, h('span', { class: 'pf-swatch', 'aria-hidden': 'true' }), h('span', { text: `The skin you wear now${sk?.css ? ', with your My skin changes' : ''}.` })),
-    'Friends can wear it for a while and switch back.'));
+    hintFor('skin', 'Friends can wear it for a while and switch back.', 'Share it and friends can wear it for a while.')));
   // Build
   const b = snap?.build;
   v.append(card('Build', b ? `${b.name} · ${b.changes.length} change${b.changes.length === 1 ? '' : 's'}` : 'Not shareable yet', levelPicker('build', ['private', 'friends']),
     b ? (b.changes.length ? h('ul', { class: 'pf-changes' }, b.changes.slice(0, 3).map(c => h('li', { text: c.title })), b.changes.length > 3 ? h('li', { class: 'more', text: `and ${b.changes.length - 3} more` }) : null) : null)
       : h('p', { class: 'pf-hint', text: "This build isn't public code yet, so nobody else could run it." }),
-    'Friends can try it on beside their own Wizard. Never shared with everyone.'));
+    hintFor('build', 'Friends can try it on beside their own Wizard.', 'Share it with friends and they can try it on. Never shared with everyone.')));
   // Apps
   const apps = snap?.apps || [];
   const grid = h('div', { class: 'pf-grid' });
@@ -180,7 +181,7 @@ function renderMe() {
 }
 function idCard() {
   const cp = h('button', { type: 'button', class: 'pf-chip on', onclick: e => copy(e.currentTarget, ME.npub, 'Copy') }, 'Copy');
-  return h('div', { class: 'pf-id' }, h('div', { class: 'wz-main' }, h('small', { text: 'Your Nostr ID' }), h('code', { class: 'pf-npub', title: ME.npub, text: ME.npub })), cp);
+  return h('div', { class: 'pf-id' }, h('div', { class: 'wz-main' }, h('small', { text: 'Your Nostr ID' }), h('code', { class: 'pf-npub', title: ME.npub, text: shortNpub(ME.npub) })), cp);
 }
 async function toggleHidden(id) {
   const set = new Set(ME.hidden); set.has(id) ? set.delete(id) : set.add(id);

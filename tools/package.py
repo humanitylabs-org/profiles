@@ -28,5 +28,20 @@ svc['dns'] = ['100.100.100.100', '1.1.1.1']
 svc['volumes'] = ['${APP_DATA_DIR}/data:/data', '${ROOT_FOLDER_HOST}/media/Skins:/skins:ro']
 svc['environment']['SKINS_DIR'] = '/skins'
 svc['x-runtipi']['internal_port'] = 8836
+# Same files package-inline ships, but zlib-compressed: Linux caps one exec argument at 128 KiB, and the plain
+# base64 bundle passed that (exec: argument list too long). Compressed it is about a third of the size.
+import base64, json, zlib  # noqa: E402
+view = sorted('web/' + p.name for p in (root / 'web').iterdir() if p.is_file() and not p.name.startswith('.'))
+payload = {p: (root / p).read_text() for p in ['app/server.py', 'openapi.json'] + view}
+blob = base64.b64encode(zlib.compress(json.dumps(payload, sort_keys=True).encode(), 9)).decode()
+code = ("import base64,json,pathlib,runpy,zlib\n"
+        "root=pathlib.Path('/tmp/wizard-app');root.mkdir(exist_ok=True)\n"
+        f"files=json.loads(zlib.decompress(base64.b64decode('{blob}')))\n"
+        "for name,text in files.items():\n"
+        " p=root/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(text)\n"
+        "runpy.run_path(str(root/'app/server.py'),run_name='__main__')\n")
+if len(code) > 120_000:
+    sys.exit(f'bundle too large for one exec argument: {len(code)} bytes')
+svc['command'] = ['python', '-c', code]
 path.write_text(yaml.safe_dump(doc, sort_keys=False, width=100000))
 print('packaged', path.relative_to(root), file=sys.stderr)

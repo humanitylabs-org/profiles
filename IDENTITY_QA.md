@@ -14,7 +14,7 @@
 
 | Command | Result |
 |---|---|
-| `python3 -m unittest discover -s tests -p 'test_*.py' -v` | **34 passed**; in-process fake relay, real disposable Schnorr/NIP-44 keys |
+| `python3 -m unittest discover -s tests -p 'test_*.py' -v` | **35 passed**; in-process fake relay, real disposable Schnorr/NIP-44 keys |
 | `node --test tests/owner-identity.cjs` | **12 passed**; mocked bridge, denial and no-downgrade paths, actual facade sign argument shape |
 | `python3 tests/run_browser.py` on the browser worker with Playwright/Chrome and `PROFILES_SHARED_CORE` | **35 existing identity-backup checks + 24 owner flow checks passed**; no browser JS errors |
 | `node --check web/app.js` and `node --check web/identity-client.js` | Passed |

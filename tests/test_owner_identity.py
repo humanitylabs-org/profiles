@@ -271,6 +271,22 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(f['name'], 'Miguel')
         self.assertIn(PK[FRIEND], f['aliases'])
 
+    def test_inbox_rotation_preserves_person_and_reshare_target(self):
+        self.relay.publish([listing(OTHER_OWNER, OTHER_BOX)])
+        f = s.add_friend({'npub': s.npub_encode(PK[OTHER_OWNER])})['friend']
+        before = s.load()['friends'][0]['inbox']
+        self.relay.publish([listing(OTHER_OWNER, FRIEND, at=NOW)])
+        s.rekey_friends()
+        after = s.load()
+        self.assertEqual(after['friends'][0]['id'], f['id'])
+        self.assertEqual(after['friends'][0]['pubkey'], PK[OTHER_OWNER])
+        self.assertEqual(after['friends'][0]['inbox'], PK[FRIEND])
+        self.assertNotEqual(after['friends'][0]['inbox'], before)
+        copies, _ = s.share_events(after)
+        event = next(e for e in copies if e['kind'] == 30078)
+        plaintext = s.nip44_decrypt(s.conversation_key(FRIEND, PK[BOX]), event['content'])
+        self.assertEqual(json.loads(plaintext)['app'], 'profiles')
+
     def test_device_revoke_stops_sharing_to_old_key(self):
         self.relay.publish([listing(OTHER_OWNER, OTHER_BOX)])
         s.add_friend({'npub': s.npub_encode(PK[OTHER_OWNER])})

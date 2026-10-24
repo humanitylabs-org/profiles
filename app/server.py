@@ -35,6 +35,7 @@ APP_ID = 'profiles'
 VERSION = '0.1.0'
 INDEX = os.environ.get('WIZARD_APP_INDEX', 'https://apps.aiwizards.com').rstrip('/')
 SHELL_REPO = os.environ.get('PROFILES_SHELL_REPO', 'humanitylabs-org/wizard-ux')
+SKINS = Path(os.environ.get('SKINS_DIR', '/skins'))   # the owner's Files Skins folder, read-only
 OWNER_LOGINS = {x.strip().lower() for x in os.environ.get('OWNER_LOGINS', '').split(',') if x.strip()}
 # The address friends add: a Serve port that exposes ONLY /profiles/api/friend/* (never the shell or other apps).
 FRIEND_LINK = os.environ.get('FRIEND_LINK', '').strip()
@@ -199,6 +200,17 @@ def clean_css(css):
     return css.strip()
 
 
+def my_skin_raw():
+    """The owner's My skin exactly as saved (comments and all), so putting it back loses nothing."""
+    for p in (SKINS / 'My skin' / 'skin.css', SKINS / 'My skin.css'):
+        try:
+            if p.is_file() and not p.is_symlink() and p.stat().st_size <= MAX_CSS:
+                return p.read_text('utf-8', 'replace')
+        except OSError:
+            pass
+    return None
+
+
 def save_look_backup(body):
     """Before wearing a friend's look, the view parks the owner's own look here so one tap puts it back."""
     if not isinstance(body, dict) or not SKIN_ID.fullmatch(str(body.get('skin') or '')) or not isinstance(body.get('css', ''), str) \
@@ -207,7 +219,8 @@ def save_look_backup(body):
     with LOCK:
         s = load()
         if not s.get('look_backup'):                 # keep the first one: trying several looks in a row still returns to yours
-            s['look_backup'] = {'skin': body['skin'], 'css': body.get('css', ''), 'at': now()}
+            raw = my_skin_raw()
+            s['look_backup'] = {'skin': body['skin'], 'css': raw if raw is not None else body.get('css', ''), 'exact': raw is not None, 'at': now()}
         s['wearing'] = {'friend': _text(body.get('friend'), 'friend', 60), 'skin': _text(body.get('friend_skin'), 'skin', 60)}
         log(s, f"Wearing {s['wearing']['friend']}'s look")
         save(s)

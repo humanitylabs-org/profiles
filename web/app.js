@@ -252,7 +252,8 @@ async function restoreLook() {
   } catch (e) { say(e.message, 'error'); }
 }
 async function putMySkin(css) {
-  const r = await fetch('/wizard/v1/my-skin', { method: css ? 'PUT' : 'DELETE', credentials: 'same-origin', headers: css ? { 'Content-Type': 'text/css' } : {}, body: css || undefined });
+  const put = !!String(css || '').trim();   // nothing to keep = reset My skin to its template
+  const r = await fetch('/wizard/v1/my-skin', { method: put ? 'PUT' : 'DELETE', credentials: 'same-origin', headers: put ? { 'Content-Type': 'text/css' } : {}, body: put ? css : undefined });
   if (!r.ok) throw new Error('Could not change your look on this box.');
   try { await shell()?.WosMySkin?.refresh?.(); } catch (_) {}
 }

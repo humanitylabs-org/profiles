@@ -24,6 +24,9 @@ svc['environment'] = {
 }
 # Friends' boxes have *.ts.net names: Tailscale's resolver answers those, a public resolver everything else.
 svc['dns'] = ['100.100.100.100', '1.1.1.1']
+# Read-only: lets the app save your My skin exactly (comments too) before you wear a friend's look.
+svc['volumes'] = ['${APP_DATA_DIR}/data:/data', '${ROOT_FOLDER_HOST}/media/Skins:/skins:ro']
+svc['environment']['SKINS_DIR'] = '/skins'
 svc['x-runtipi']['internal_port'] = 8836
 path.write_text(yaml.safe_dump(doc, sort_keys=False, width=100000))
 print('packaged', path.relative_to(root), file=sys.stderr)

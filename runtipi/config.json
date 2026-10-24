@@ -10,8 +10,8 @@
     "social"
   ],
   "description": "Your Wizard profile with its own Nostr ID. Share your look, your build and your App Store apps with friends or everyone, encrypted through Nostr. Nobody connects to your Wizard; apps you build never show.",
-  "tipi_version": 3,
-  "version": "0.3.0",
+  "tipi_version": 4,
+  "version": "0.4.0",
   "source": "https://github.com/oscarhenrycollins/profiles",
   "exposable": false,
   "supported_architectures": [

@@ -40,6 +40,37 @@ async function copy(btn, text, label) {
   catch (_) { say('Copy failed. Long-press the ID instead.', 'error'); }
 }
 
+/* ---------- app groups: the same kinds, order and system ring as the Wizard app selector (core/app-kinds.js) ---------- */
+const KINDS = [['view', 'Apps'], ['service', 'Agent apps'], ['agent', 'Agents'], ['external', 'Connectors']];
+// Same defaults as the shell; the shell's own rule wins when Profiles runs inside Wizard.
+const SYSTEM_IDS = new Set(['wizard', 'setup', 'files', 'notifications', 'transcriber', 'browser', 'secret-drop', 'wizard-chatgpt', 'wizard-claude']);
+function isSystemApp(a) {
+  for (const w of [shell(), (() => { try { return top; } catch (_) { return null; } })()]) { try { const K = w?.WosAppKinds; if (K) return !!K.isSystem({ id: a.id, system: a.system }); } catch (_) {} }
+  return SYSTEM_IDS.has(a.id);
+}
+const SYS_KEY = 'profiles.hideSystem';
+const hideSystem = () => { try { return localStorage.getItem(SYS_KEY) === '1'; } catch (_) { return false; } };
+// Apps grouped by kind; system apps lead each group in purple. `tile(a)` builds one tile.
+function appGroups(apps, tile) {
+  const wrap = h('div', { class: 'pf-groups' });
+  const sysCount = apps.filter(a => a.system).length, folded = hideSystem() && sysCount > 0;
+  for (const [type, label] of KINDS) {
+    const list = apps.filter(a => (a.type || 'service') === type)
+      .sort((x, y) => (!!y.system - !!x.system) || x.name.localeCompare(y.name, undefined, { sensitivity: 'base' }));
+    if (!list.length) continue;
+    const shown = folded ? list.filter(a => !a.system) : list;
+    const grid = h('div', { class: 'pf-grid' }, shown.map(tile));
+    const hiddenSys = list.length - shown.length;
+    wrap.append(h('section', { class: 'pf-group' },
+      h('h3', { class: 'pf-group-h' }, label, h('span', { text: String(list.length) })),
+      shown.length ? grid : null,
+      hiddenSys && !shown.length ? h('p', { class: 'pf-hint', text: `${hiddenSys} system app${hiddenSys === 1 ? '' : 's'}` }) : null));
+  }
+  if (sysCount) wrap.append(h('button', { type: 'button', class: 'pf-sys-toggle', onclick: () => { try { localStorage.setItem(SYS_KEY, folded ? '0' : '1'); } catch (_) {} render(); } },
+    h('span', { class: 'pf-sys-dot', 'aria-hidden': 'true' }), folded ? `Show ${sysCount} system app${sysCount === 1 ? '' : 's'}` : 'Hide system apps'));
+  return wrap;
+}
+
 /* ---------- app icons: the same sigils the Wizard dock and Home use ---------- */
 function appIcon(a, cls = 'pf-ic') {
   const S = window.WizSigil || shell()?.WizSigil;
@@ -62,7 +93,7 @@ async function localFacts() {
   const build = rel?.build ? { commit: rel.build, name: rel.name || 'My Wizard', base: rel.base?.ref || '', changes: rel.changes || [], built_at: rel.built_at || '' }
     : shellApp?.commit ? { commit: shellApp.commit, name: 'Wizard', base: '', changes: [], built_at: '' } : null;
   const sk = currentSkin();
-  return { build, apps: wam.map(a => ({ id: a.id, repo: a.repo, name: a.name || a.id })), skin: { id: sk.id, name: sk.name, css } };
+  return { build, apps: wam.map(a => ({ id: a.id, repo: a.repo, name: a.name || a.id, system: isSystemApp(a) })), skin: { id: sk.id, name: sk.name, css } };
 }
 const SKIN_NAMES = { nebula: 'Nebula', grove: 'Grove', tide: 'Tide', ember: 'Ember', signal: 'Signal', obsidian: 'Dark', 'obsidian-light': 'Light', landscapes: 'Landscapes' };
 function currentSkin() {
@@ -104,12 +135,65 @@ function squarePhoto(file) {
   });
 }
 function pickPhoto() {
-  const file = h('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp,image/*', class: 'pf-file', onchange: async () => {
-    const f0 = file.files?.[0]; file.remove(); if (!f0) return;
-    try { const picture = await squarePhoto(f0); ME = await api('api/me', 'PUT', { picture }); render(); say('Photo saved.', 'note'); }
-    catch (err) { say(err.message, 'error'); }
+  const file = h('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp,image/*', class: 'pf-file', onchange: () => {
+    const f0 = file.files?.[0]; file.remove(); if (f0) cropPhoto(f0);
   } });
   document.body.append(file); file.click();
+}
+// Pick which part of the photo shows in the circle: drag to move, pinch or the slider to zoom. Then one square
+// JPEG (192 px, under 60 KB) is made on this device and saved; the original never leaves it.
+function cropPhoto(file) {
+  const url = URL.createObjectURL(file), img = new Image();
+  img.onerror = () => { URL.revokeObjectURL(url); say("This device can't read that file. Pick a JPEG or PNG photo.", 'error'); };
+  img.onload = () => {
+    const S = 280;                                   // the crop circle on screen
+    const base = S / Math.min(img.naturalWidth, img.naturalHeight);
+    let zoom = 1, x = 0, y = 0;                       // x, y: offset of the image centre from the circle centre (screen px)
+    const view = h('canvas', { class: 'pf-crop-c', width: S * 2, height: S * 2, 'aria-label': 'Drag to move the photo, pinch to zoom' });
+    const ctx = view.getContext('2d');
+    const clamp = () => {
+      const w = img.naturalWidth * base * zoom, hh = img.naturalHeight * base * zoom;
+      x = Math.max(-(w - S) / 2, Math.min((w - S) / 2, x)); y = Math.max(-(hh - S) / 2, Math.min((hh - S) / 2, y));
+    };
+    const draw = () => {
+      clamp(); const k = base * zoom, w = img.naturalWidth * k, hh = img.naturalHeight * k;
+      ctx.setTransform(2, 0, 0, 2, 0, 0); ctx.clearRect(0, 0, S, S);
+      ctx.drawImage(img, S / 2 + x - w / 2, S / 2 + y - hh / 2, w, hh);
+    };
+    const slider = h('input', { type: 'range', min: '1', max: '4', step: '0.01', value: '1', class: 'pf-zoom', 'aria-label': 'Zoom', oninput: () => { zoom = +slider.value; draw(); } });
+    const pts = new Map(); let pinch = null;
+    view.addEventListener('pointerdown', e => { view.setPointerCapture(e.pointerId); pts.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), z: zoom }; } });
+    view.addEventListener('pointermove', e => {
+      const p = pts.get(e.pointerId); if (!p) return;
+      if (pts.size === 1) { x += e.clientX - p.x; y += e.clientY - p.y; }
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size === 2 && pinch) { const [a, b] = [...pts.values()]; zoom = Math.max(1, Math.min(4, pinch.z * Math.hypot(a.x - b.x, a.y - b.y) / pinch.d)); slider.value = String(zoom); }
+      draw();
+    });
+    const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+    view.addEventListener('pointerup', up); view.addEventListener('pointercancel', up);
+    view.addEventListener('wheel', e => { e.preventDefault(); zoom = Math.max(1, Math.min(4, zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08))); slider.value = String(zoom); draw(); }, { passive: false });
+    const close = () => { URL.revokeObjectURL(url); sheet.remove(); };
+    const save = h('button', { type: 'button', class: 'pf-btn go', onclick: async () => {
+      save.disabled = true; save.textContent = 'Saving…';
+      try {
+        const out = document.createElement('canvas'); out.width = out.height = 192;
+        const k = base * zoom, w = img.naturalWidth * k, hh = img.naturalHeight * k, r = 192 / S;
+        out.getContext('2d').drawImage(img, (S / 2 + x - w / 2) * r, (S / 2 + y - hh / 2) * r, w * r, hh * r);
+        let q = .85, data = out.toDataURL('image/jpeg', q);
+        while (data.length > 50000 && q > .3) { q -= .12; data = out.toDataURL('image/jpeg', q); }
+        ME = await api('api/me', 'PUT', { picture: data }); close(); render(); say('Photo saved.', 'note');
+      } catch (err) { say(err.message, 'error'); save.disabled = false; save.textContent = 'Use photo'; }
+    } }, 'Use photo');
+    const sheet = h('div', { class: 'pf-crop', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Choose what shows in your photo' },
+      h('div', { class: 'pf-crop-card' },
+        h('b', { text: 'Move and zoom' }), h('small', { text: 'What is inside the circle is your photo.' }),
+        h('div', { class: 'pf-crop-stage' }, view, h('span', { class: 'pf-crop-ring', 'aria-hidden': 'true' })),
+        slider,
+        h('div', { class: 'pf-row-acts center' }, h('button', { type: 'button', class: 'pf-btn', onclick: close }, 'Cancel'), save)));
+    document.body.append(sheet); draw(); save.focus();
+  };
+  img.src = url;
 }
 
 /* ---------- You ---------- */
@@ -164,12 +248,11 @@ function renderMe() {
     hintFor('build', 'Friends can try it on beside their own Wizard.', 'Share it with friends and they can try it on. Never shared with everyone.')));
   // Apps
   const apps = snap?.apps || [];
-  const grid = h('div', { class: 'pf-grid' });
-  for (const a of apps) {
+  const grid = appGroups(apps, a => {
     const off = ME.hidden.includes(a.id);
-    grid.append(h('button', { type: 'button', class: 'pf-tile' + (off ? ' off' : ''), 'aria-pressed': String(!off), title: off ? 'Hidden. Tap to show.' : 'Shown. Tap to hide.', onclick: () => toggleHidden(a.id) },
-      appIcon(a), h('span', { class: 'pf-tile-n', text: a.name }), off ? h('span', { class: 'pf-tile-x', text: 'Hidden' }) : null));
-  }
+    return h('button', { type: 'button', class: 'pf-tile' + (off ? ' off' : '') + (a.system ? ' sys' : ''), 'aria-pressed': String(!off), title: off ? 'Hidden. Tap to show.' : 'Shown. Tap to hide.', onclick: () => toggleHidden(a.id) },
+      appIcon(a), h('span', { class: 'pf-tile-n', text: a.name }), off ? h('span', { class: 'pf-tile-x', text: 'Hidden' }) : null);
+  });
   const kept = (REPORT?.kept_private || []).filter(x => x.part === 'apps').length;
   const shown = apps.length - apps.filter(a => ME.hidden.includes(a.id)).length;
   v.append(card('Apps', `${shown} of ${apps.length} App Store apps`, levelPicker('apps', ['private', 'friends', 'public']),
@@ -292,13 +375,11 @@ function renderFriend() {
       mine ? null : 'Runs their exact build beside yours, with your own chats and apps. Yours is not changed.'));
   }
   if (p.apps) {
-    const grid = h('div', { class: 'pf-grid' });
-    for (const a of p.apps) {
+    const grid = appGroups(p.apps, a => {
       const have = INSTALLED.includes(a.id);
-      const tile = h(mine || have ? 'div' : 'a', { class: 'pf-tile', ...(mine || have ? {} : { href: `/wizard-os-home/store/index.html?app=${encodeURIComponent(a.store_id || a.id)}`, title: `Get ${a.name}` }) },
+      return h(mine || have ? 'div' : 'a', { class: 'pf-tile' + (a.system ? ' sys' : ''), ...(mine || have ? {} : { href: `/wizard-os-home/store/index.html?app=${encodeURIComponent(a.store_id || a.id)}`, title: `Get ${a.name}` }) },
         appIcon(a), h('span', { class: 'pf-tile-n', text: a.name }), mine ? null : h('span', { class: 'pf-tile-x' + (have ? '' : ' get'), text: have ? 'You have it' : 'Get' }));
-      grid.append(tile);
-    }
+    });
     v.append(card('Apps', `${p.apps.length} App Store app${p.apps.length === 1 ? '' : 's'}`, null, p.apps.length ? grid : h('p', { class: 'pf-hint', text: 'No apps shared.' }), null));
   }
   if (!mine && f.id) v.append(h('div', { class: 'pf-row-acts center' }, h('button', { type: 'button', class: 'pf-btn danger', onclick: () => removeFriend(f) }, `Remove ${f.name}`)));

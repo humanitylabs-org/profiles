@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path(os.environ.get('APP_ROOT', '.')).resolve()
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'profiles'
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 INDEX = os.environ.get('WIZARD_APP_INDEX', 'https://apps.aiwizards.com').rstrip('/')
 SHELL_REPO = os.environ.get('PROFILES_SHELL_REPO', 'humanitylabs-org/wizard-ux')
 SKINS = Path(os.environ.get('SKINS_DIR', '/skins'))   # the owner's Files Skins folder, read-only
@@ -604,6 +604,15 @@ def _cached(key, ttl, fn):
     return value
 
 
+APP_TYPES = ('view', 'service', 'agent', 'external')   # App Store kinds: Apps, Agent apps, Agents, Connectors
+
+
+def app_type(rec):
+    """The App Store's own kind for a listing, so every Wizard groups a profile's apps the same way."""
+    t = str((rec or {}).get('type') or '')
+    return t if t in APP_TYPES else 'service'
+
+
 def store_listing(repo):
     """The App Index record when this exact repo is listed publicly; None for local, private or delisted apps."""
     def look():
@@ -752,7 +761,7 @@ def publish(body):
             continue
         apps.append({'id': a['id'], 'repo': rec['repo'], 'store_id': str(rec.get('id') or a['id'])[:64],
                      'name': str(rec.get('name') or a['id'])[:60], 'summary': str(rec.get('summary') or '')[:200],
-                     'category': str(rec.get('category') or '')[:30]})
+                     'category': str(rec.get('category') or '')[:30], 'type': app_type(rec), 'system': a.get('system') is True})
     snap['apps'] = sorted(apps, key=lambda x: x['name'].lower())
     report['shared'].append({'part': 'apps', 'what': f'{len(apps)} App Store apps'})
 
@@ -1003,7 +1012,7 @@ def clean_remote(p, f, viewer):
                 if rec:
                     apps.append({'id': a['id'], 'repo': rec['repo'], 'store_id': str(rec.get('id') or a['id'])[:64],
                                  'name': str(rec.get('name') or a['id'])[:60], 'summary': str(rec.get('summary') or '')[:200],
-                                 'uses': a.get('uses') is True})
+                                 'type': app_type(rec), 'system': a.get('system') is True, 'uses': a.get('uses') is True})
         out['apps'] = apps
     return out
 

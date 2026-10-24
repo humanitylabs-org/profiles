@@ -1,0 +1,44 @@
+{
+  "name": "Profiles",
+  "id": "profiles",
+  "wizard_type": "service",
+  "available": true,
+  "short_desc": "Your Wizard profile: share your build, look and App Store apps with friends, and try on theirs.",
+  "author": "Humanity Labs",
+  "port": 8836,
+  "categories": [
+    "social"
+  ],
+  "description": "Share your build, your look and your App Store apps as Private, Friends or Everyone. Friends reach you over a private Tailscale connection; local apps never show.",
+  "tipi_version": 1,
+  "version": "0.1.0",
+  "source": "https://github.com/oscarhenrycollins/profiles",
+  "exposable": false,
+  "supported_architectures": [
+    "amd64",
+    "arm64"
+  ],
+  "created_at": 1792800000000,
+  "updated_at": 1792800000000,
+  "dynamic_config": true,
+  "min_tipi_version": "4.8.0",
+  "uid": 1000,
+  "gid": 1000,
+  "form_fields": [
+    {
+      "type": "text",
+      "label": "Your Tailscale login (who owns this profile)",
+      "hint": "The email you sign in to Tailscale with. Only this login can change your profile.",
+      "required": true,
+      "env_variable": "PROFILES_OWNER_LOGINS"
+    },
+    {
+      "type": "text",
+      "label": "Your friend link (optional)",
+      "hint": "The private address friends add, e.g. https://your-box.ts.net:8842/profiles/. Your agent sets this up.",
+      "required": false,
+      "env_variable": "PROFILES_FRIEND_LINK"
+    }
+  ],
+  "no_gui": false
+}

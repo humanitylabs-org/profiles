@@ -2,10 +2,10 @@
 wizard: 0.2
 id: profiles
 name: Profiles
-type: service
+type: view
 category: app
-version: 0.1.0
-summary: Your Wizard profile. Share your build, your look and your App Store apps with friends or everyone, and try on theirs.
+version: 0.4.0
+summary: Your Wizard profile with its own Nostr ID. Add friends by ID and share your look, build and App Store apps.
 tags: [social]
 license: GPL-3.0-only
 source: https://github.com/oscarhenrycollins/profiles

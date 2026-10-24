@@ -817,7 +817,9 @@ def is_owner(headers):
     if not via_serve(headers):
         return True
     login = (headers.get('Tailscale-User-Login') or '').strip().lower()
-    return bool(login) and login in OWNER_LOGINS
+    # With no logins set, anyone signed in to this tailnet counts (Profiles is only published on the owner's private
+    # network, like the shell itself); tagged or anonymous callers never do.
+    return bool(login) and (not OWNER_LOGINS or login in OWNER_LOGINS)
 
 
 # ---------- sharing over Nostr ----------

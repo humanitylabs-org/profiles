@@ -17,6 +17,13 @@ The owner's Wizard profile: his build (his version of the Wizard shell), his loo
 - `profile_get` reads visibility, the published snapshot, friends and requests. `profile_preview` with `as: friend|public` shows exactly what others see.
 - `profile_set_visibility` changes one part. Only when the owner asked. Sharing is a privacy decision; never widen it on your own.
 - `friends_list` and `friend_profile` (friend id) read friends and what a friend shares.
-- Publishing, adding friends, wearing a look and trying on a build are done by the owner in the Profiles screen. Point him there instead of doing it for him.
+- Adding friends, choosing who sees what, wearing a look and trying on a build happen in the Profiles screen. Point the owner there instead of doing it for him. There is no Publish step: the screen shares changes by itself.
 
-Rules the app enforces (don't work around them): an app is shared only if the Wizard App Index lists its public repo, so local and private apps never show; a build is shared only if its exact commit is public shell code; others see a frozen snapshot from his last Publish, never live state; a friend's answer is re-checked on this box before it is shown.
+Rules the app enforces (don't work around them): an app is shared only if the Wizard App Index lists its public repo, so local and private apps never show; a build is shared only if its exact commit is public shell code and never with everyone; a friend's profile is checked on this box (signature, App Index, CSS) before it is shown.
+
+## Setup: put Profiles on the Wizard's own address
+Profiles reads the look, build and apps from the Wizard it runs in, so it must open on the shell's own address (`/profiles/`), not on a port of its own. If the screen says "Profiles can't see your Wizard yet":
+1. Back up `~/.wizard-os/links.json`.
+2. In its `links` list, set the `profiles` entry's `open` to `/profiles/` and add `"gateway_strip": true` (keep the other fields).
+3. Run `wam links`, then check that `https://<box>:<shell port>/profiles/healthz` answers. Reload Profiles.
+Trying on a friend's build also needs the box's try-on helper; without it the button says so, and everything else works.

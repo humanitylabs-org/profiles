@@ -116,10 +116,12 @@ function currentSkin() {
   return { id, name: S?.list?.find(x => x.id === id)?.name || SKIN_NAMES[id] || id };
 }
 // Every open: give the app what this Wizard has now. It only shares again when something changed.
+let APART = false;   // opened on its own address, so it can't read what this Wizard runs
 async function refresh() {
   try {
     const f = await localFacts();
-    if (!f.build) return;
+    APART = !f.build && !f.apps.length;
+    if (APART) { render(); return; }
     const out = await api('api/publish', 'POST', { build: f.build, skin: f.skin, apps: f.apps });
     ME = out.me; REPORT = out.report; render();
   } catch (e) { say(e.message, 'error'); }
@@ -240,6 +242,8 @@ function renderMe() {
     h('div', { class: 'wz-main' }, h('b', { text: ME.name || 'Add your name' }), h('small', { text: ME.bio || (ME.picture ? 'Your Wizard profile' : 'Tap the circle to add a photo') })),
     h('button', { type: 'button', class: 'pf-btn', onclick: editName }, 'Edit')));
   v.append(idCard());
+  if (APART) v.append(h('div', { class: 'pf-banner' }, h('b', { text: "Profiles can't see your Wizard yet. " }),
+    'It opened on an address of its own, so it can\'t read your look, build and apps. Ask your Wizard: "Put Profiles on my Wizard\'s own address." Friends and your Nostr ID already work.'));
   v.append(h('p', { class: 'pf-share', text: shareLine() }));
   // Name and photo
   v.append(card('Name and photo', 'Friends always see who you are', levelPicker('card', ['friends', 'public']), null));
@@ -264,7 +268,7 @@ function renderMe() {
   const kept = (REPORT?.kept_private || []).filter(x => x.part === 'apps').length;
   const shown = apps.length - apps.filter(a => ME.hidden.includes(a.id)).length;
   v.append(card('Apps', `${shown} of ${apps.length} App Store apps`, levelPicker('apps', ['private', 'friends', 'public']),
-    apps.length ? grid : h('p', { class: 'pf-hint', text: 'Reading your apps…' }),
+    apps.length ? grid : h('p', { class: 'pf-hint', text: APART ? 'Not readable from this address yet.' : 'Reading your apps…' }),
     `Tap an app to hide or show it.${kept ? ` ${kept} app${kept === 1 ? '' : 's'} you built or keep private never show.` : ' Apps you built yourself never show.'}`));
   v.append(h('div', { class: 'pf-row-acts center' },
     h('button', { type: 'button', class: 'pf-btn', onclick: () => preview('friend') }, 'See what friends see'),

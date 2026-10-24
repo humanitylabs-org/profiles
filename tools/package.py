@@ -24,9 +24,6 @@ svc['environment'] = {
 }
 # Nostr relays and the App Index are on the public internet.
 svc['dns'] = ['1.1.1.1', '9.9.9.9']
-# Read-only: lets the app save your My skin exactly (comments too) before you wear a friend's look.
-svc['volumes'] = ['${APP_DATA_DIR}/data:/data', '${ROOT_FOLDER_HOST}/media/Skins:/skins:ro']
-svc['environment']['SKINS_DIR'] = '/skins'
 svc['x-runtipi']['internal_port'] = 8836
 # Same files package-inline ships, but zlib-compressed: Linux caps one exec argument at 128 KiB, and the plain
 # base64 bundle passed that (exec: argument list too long). Compressed it is about a third of the size.

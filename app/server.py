@@ -229,6 +229,9 @@ def box_key():
     path = DATA / 'wizard-key.json'
     try:
         sk = bytes.fromhex(json.loads(path.read_text())['secret'])
+        # Owner-only, every start: copies and restores of app-data can loosen it.
+        for p in [path, *DATA.glob('wizard-key.before-*.json'), DATA / 'profile.json']:
+            _quiet(os.chmod, p, 0o600)
     except (OSError, ValueError, KeyError):
         sk = new_secret()
         DATA.mkdir(parents=True, exist_ok=True)

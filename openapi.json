@@ -2,7 +2,7 @@
  "openapi": "3.0.3",
  "info": {
   "title": "Wizard Profiles",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Owner-only API. Share your look, build and App Store apps as Only you, Friends or Everyone through Nostr relays; friends are Nostr IDs."
  },
  "paths": {
@@ -329,7 +329,7 @@
   },
   "/api/identity/backup": {
    "post": {
-    "summary": "Make a password-locked backup of this Wizard's Nostr key (NIP-49 ncryptsec). The password is never stored.",
+    "summary": "Owner only: export nsec with explicit format nsec and no password, or optional NIP-49 ncryptsec with a password. Omitted format requires a password. Never exposed via MCP. Responses are no-store.",
     "requestBody": {
      "content": {
       "application/json": {
@@ -339,11 +339,14 @@
          "password": {
           "type": "string",
           "minLength": 10
+          },
+          "format": {
+          "type": "string",
+          "enum": ["nsec", "ncryptsec"],
+          "default": "ncryptsec"
          }
         },
-        "required": [
-         "password"
-        ]
+        "description": "Password of at least 10 characters is required unless format is explicitly nsec."
        }
       }
      }
@@ -384,7 +387,7 @@
   },
   "/api/identity/restore": {
    "post": {
-    "summary": "Switch this Wizard to the Nostr ID in a backup. The replaced key is kept on the box.",
+    "summary": "Owner only: restore raw nsec without a password or ncryptsec with its password. The replaced key is kept on the box.",
     "requestBody": {
      "content": {
       "application/json": {
@@ -399,8 +402,7 @@
          }
         },
         "required": [
-         "backup",
-         "password"
+         "backup"
         ]
        }
       }

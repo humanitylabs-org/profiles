@@ -35,7 +35,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path(os.environ.get('APP_ROOT', '.')).resolve()
 DATA = Path(os.environ.get('DATA_DIR', ROOT / '.data'))
 APP_ID = 'profiles'
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 INDEX = os.environ.get('WIZARD_APP_INDEX', 'https://apps.aiwizards.com').rstrip('/')
 SHELL_REPO = os.environ.get('PROFILES_SHELL_REPO', 'humanitylabs-org/wizard-ux')
 SKINS = Path(os.environ.get('SKINS_DIR', '/skins'))   # the owner's Files Skins folder, read-only
@@ -222,7 +222,7 @@ _KEY = None
 
 
 def box_key():
-    """This Wizard's own key: made once on first start, kept 0600 in app-data, never leaves the app."""
+    """This Wizard's own key: made once, kept 0600, exported only by explicit owner backup."""
     global _KEY
     if _KEY:
         return _KEY
@@ -380,10 +380,10 @@ def ncryptsec_decode(text, password):
     raw = b32_decode('ncryptsec', text)
     if raw is None and str(text or '').strip().lower().startswith('nsec1'):
         raw = b32_decode('nsec', text)
-        if raw is not None and len(raw) == 32:
+        if raw is not None and len(raw) == 32 and 0 < int.from_bytes(raw, 'big') < _N:
             return raw
     if raw is None or len(raw) != 91 or raw[0] != 2:
-        raise Problem(400, "That isn't a Profiles backup. It should start with ncryptsec1.")
+        raise Problem(400, "That isn't a valid key or backup. It should start with nsec1 or ncryptsec1.")
     log_n, salt, nonce, ad, sealed = raw[1], raw[2:18], raw[18:42], raw[42:43], raw[43:]
     if not 1 <= log_n <= 16:
         raise Problem(400, "This backup uses a setting this Wizard can't open.")
@@ -398,9 +398,14 @@ def ncryptsec_decode(text, password):
 
 
 def backup_identity(body):
-    pw = _check_password((body or {}).get('password'))
+    body = body or {}
+    fmt = body.get('format', 'ncryptsec')  # Old callers must still supply a password.
+    if fmt not in ('nsec', 'ncryptsec'):
+        raise Problem(400, 'Choose nsec or ncryptsec backup format.')
+    pw = _check_password(body.get('password')) if fmt == 'ncryptsec' else None
     sk, pk = box_key()
-    return {'backup': ncryptsec_encode(sk, pw), 'npub': npub_encode(pk)}
+    return {'backup': b32_encode('nsec', sk) if fmt == 'nsec' else ncryptsec_encode(sk, pw),
+            'npub': npub_encode(pk), 'format': fmt}
 
 
 def confirm_backup():

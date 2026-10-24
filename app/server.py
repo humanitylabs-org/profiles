@@ -34,7 +34,9 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 try:
     from . import identity_resolve as identity
-except ImportError:  # Direct script / inline Runtipi entry point.
+except ImportError:  # Direct script / inline Runtipi entry point (runpy.run_path adds no sys.path entry).
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parent))
     import identity_resolve as identity
 
 ROOT = Path(__file__).resolve().parent.parent if '__file__' in globals() else Path(os.environ.get('APP_ROOT', '.')).resolve()

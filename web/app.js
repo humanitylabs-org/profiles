@@ -8,7 +8,7 @@ const TRYON = '/wizard-os-home/tryon/api/';
 const LEVEL = { private: 'Only you', friends: 'Friends', public: 'Everyone' };
 const PART = { build: 'Build', skin: 'Look', apps: 'Apps' };
 const HINT = {
-  build: 'Your version of Wizard. Friends can try it on, and Revert is one tap.',
+  build: 'Your version of Wizard. Friends can try it on beside their own Wizard; Stop ends it.',
   skin: 'Your skin and your own touches to it.',
   apps: 'Only apps from the App Store. Apps you build yourself never show.',
 };
@@ -114,7 +114,7 @@ function renderMe() {
     const list = h('ul', { class: 'wz-list' });
     for (const a of snap.apps) {
       const hidden = ME.hidden.includes(a.id), uses = ME.uses.includes(a.id);
-      list.append(h('li', { class: 'pf-app' + (hidden ? ' off' : '') },
+      list.append(h('li', { class: 'pf-item' + (hidden ? ' off' : '') },
         h('div', { class: 'wz-main' }, h('b', { text: a.name }), h('small', { text: hidden ? 'Hidden from your profile' : uses ? 'Shown · you use this a lot' : 'Shown' })),
         h('button', { type: 'button', class: 'pf-chip' + (uses ? ' on' : ''), 'aria-pressed': String(uses), disabled: hidden, onclick: () => toggleApp('uses', a.id) }, 'I use this'),
         h('button', { type: 'button', class: 'pf-chip', onclick: () => toggleApp('hidden', a.id) }, hidden ? 'Show' : 'Hide')));
@@ -134,7 +134,7 @@ function renderFriends() {
   const v = $('view-friends'); v.replaceChildren();
   if (ME.requests.length) {
     const reqs = h('ul', { class: 'wz-list' });
-    for (const r of ME.requests) reqs.append(h('li', { class: 'pf-app' },
+    for (const r of ME.requests) reqs.append(h('li', { class: 'pf-item' },
       h('div', { class: 'wz-main' }, h('b', { text: r.name }), h('small', { text: `${r.login} · wants to be friends` })),
       h('button', { type: 'button', class: 'pf-chip on', onclick: () => addForm(r) }, 'Add back'),
       h('button', { type: 'button', class: 'pf-chip', onclick: async () => { ME = await api('api/requests/dismiss', 'POST', { login: r.login }); render(); } }, 'Ignore')));
@@ -152,7 +152,7 @@ function renderFriends() {
   if (ME.link) {
     const copy = h('button', { type: 'button', class: 'pf-chip', onclick: async () => { try { await navigator.clipboard.writeText(`${ME.link}\n${ME.you}`); copy.textContent = 'Copied'; } catch (_) { say('Copy failed. Select the link instead.', 'error'); } } }, 'Copy');
     v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Your link'),
-      h('div', { class: 'pf-app' }, h('div', { class: 'wz-main' }, h('b', { class: 'pf-link', text: ME.link }), h('small', { text: ME.you ? `Send this and your login (${ME.you}) to a friend.` : 'Send this to a friend.' })), copy),
+      h('div', { class: 'pf-item' }, h('div', { class: 'wz-main' }, h('b', { class: 'pf-link', text: ME.link }), h('small', { text: ME.you ? `Send this and your login (${ME.you}) to a friend.` : 'Send this to a friend.' })), copy),
       h('p', { class: 'pf-hint', text: 'This address only answers friend requests and your shared profile. Your Wizard and apps stay closed to them.' })));
   }
 }
@@ -222,7 +222,7 @@ function renderFriend() {
   if (p.apps) {
     const list = h('ul', { class: 'wz-list' });
     const have = new Set((FRIEND.installed || []));
-    for (const a of p.apps) list.append(h('li', { class: 'pf-app' },
+    for (const a of p.apps) list.append(h('li', { class: 'pf-item' },
       h('div', { class: 'wz-main' }, h('b', { text: a.name }, a.uses ? h('span', { class: 'pf-uses', text: 'uses a lot' }) : null), h('small', { text: a.summary })),
       FRIEND.preview ? null : have.has(a.id) ? h('span', { class: 'pf-have' }, 'You have it') : h('a', { class: 'pf-chip on', href: `/wizard-os-home/store/index.html?app=${encodeURIComponent(a.store_id || a.id)}` }, 'Get')));
     v.append(h('section', { class: 'wz-sec' }, h('h2', { class: 'wz-sec-h' }, 'Apps', h('span', { class: 'wz-count', text: String(p.apps.length) })), p.apps.length ? list : h('p', { class: 'pf-hint', text: 'No App Store apps shared.' })));

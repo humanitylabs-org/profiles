@@ -1,9 +1,15 @@
 /* Profiles: app specifics only. Shared type, rows, colours come from wizard-ui.css (skin tokens, no literals). */
-.pf-app { max-width: 680px; }
-.pf-scroll { padding-top: calc(var(--wos-cutout, 0px) + 10px); padding-bottom: 24px; }
+.pf-root { max-width: 680px; }
+/* Title over subtitle everywhere (the kit only stacks them inside .wz-row). */
+.pf-who .wz-main, .pf-part .wz-main, .pf-item .wz-main, .pf-tryon .wz-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pf-part .wz-main b, .pf-item .wz-main b, .pf-tryon .wz-main b { font-size: 15px; font-weight: 650; }
+.pf-part small, .pf-item small, .pf-tryon small, .pf-who small { font-size: 13px; color: var(--ink-3); overflow-wrap: anywhere; }
+.pf-scroll { padding-top: calc(var(--wos-cutout, 0px) + 10px); padding-bottom: 32px; }
+.pf-item .wz-main { flex: 1; }
 .pf-view[hidden], .pf-tryon[hidden] { display: none; }
 
 .pf-who { display: flex; align-items: center; gap: 14px; padding: 12px 8px 16px; }
+.pf-who .wz-main { flex: 1; }
 .pf-who .wz-main b { font-size: 19px; font-weight: 750; }
 .pf-avatar { flex: none; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; font-size: 22px; font-weight: 800;
   color: var(--on-accent); background: var(--accent); }
@@ -31,9 +37,9 @@
 .pf-btn:disabled { opacity: .5; cursor: default; }
 .pf-row-acts { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; }
 
-.pf-app { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px; }
-.pf-app + .pf-app { border-top: 1px solid var(--line); }
-.pf-app.off .wz-main b { color: var(--ink-3); }
+.pf-item { display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px; }
+.pf-item + .pf-item { border-top: 1px solid var(--line); }
+.pf-item.off .wz-main b { color: var(--ink-3); }
 .pf-chip { flex: none; min-height: 34px; padding: 0 12px; border-radius: 99px; font-size: 13px; font-weight: 650; color: var(--ink-2);
   box-shadow: inset 0 0 0 1.5px var(--line-2); text-decoration: none; display: inline-flex; align-items: center; }
 .pf-chip.on { color: var(--on-accent); background: var(--accent); box-shadow: none; }

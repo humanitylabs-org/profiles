@@ -186,8 +186,8 @@ function cropPhoto(file) {
       save.disabled = true; save.textContent = 'Saving…';
       try {
         const out = document.createElement('canvas'); out.width = out.height = 192;
-        const k = base * zoom, w = img.naturalWidth * k, hh = img.naturalHeight * k, r = 192 / S;
-        out.getContext('2d').drawImage(img, (S / 2 + x - w / 2) * r, (S / 2 + y - hh / 2) * r, w * r, hh * r);
+        const k = base * zoom, w = img.naturalWidth * k, hh = img.naturalHeight * k, C = S - 40, r = 192 / C;
+        out.getContext('2d').drawImage(img, (S / 2 + x - w / 2 - 20) * r, (S / 2 + y - hh / 2 - 20) * r, w * r, hh * r);
         let q = .85, data = out.toDataURL('image/jpeg', q);
         while (data.length > 50000 && q > .3) { q -= .12; data = out.toDataURL('image/jpeg', q); }
         ME = await api('api/me', 'PUT', { picture: data }); close(); render(); say('Photo saved.', 'note');
@@ -195,7 +195,7 @@ function cropPhoto(file) {
     } }, 'Use photo');
     const sheet = h('div', { class: 'pf-crop', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Choose what shows in your photo' },
       h('div', { class: 'pf-crop-card' },
-        h('b', { text: 'Move and zoom' }), h('small', { text: 'What is inside the circle is your photo.' }),
+        h('b', { text: 'Move and zoom' }), h('small', { text: 'Drag to move. Pinch or slide to zoom.' }),
         h('div', { class: 'pf-crop-stage' }, view, h('span', { class: 'pf-crop-ring', 'aria-hidden': 'true' })),
         slider,
         h('div', { class: 'pf-row-acts center' }, h('button', { type: 'button', class: 'pf-btn', onclick: close }, 'Cancel'), save)));
